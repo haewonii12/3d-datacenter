@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DC Rack 3D</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="viewport"></div>
+      <header id="topbar">
+        <select id="dc-select" aria-label="데이터센터 선택"></select>
+        <nav id="breadcrumb" aria-label="breadcrumb"></nav>
+        <div id="search-wrap">
+          <input id="search" type="search" placeholder="호스트명 / 서비스명 검색" autocomplete="off" spellcheck="false" />
+          <ul id="search-results" hidden></ul>
+        </div>
+        <div id="warnings-wrap">
+          <button id="warnings" type="button" hidden></button>
+          <ul id="warnings-list" hidden></ul>
+        </div>
+      </header>
+      <section id="floor-summary" hidden></section>
+      <aside id="panel" hidden></aside>
+      <div id="tooltip" hidden></div>
+      <section id="error" hidden></section>
+      <footer id="info"></footer>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

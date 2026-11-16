@@ -1,0 +1,13 @@
+node_modules
+dist
+test-results
+playwright-report
+.omc
+.git
+docs
+tests
+examples
+k8s
+*.md
+.dockerignore
+Dockerfile

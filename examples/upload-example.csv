@@ -1,0 +1,8 @@
+﻿dc_id,dc_name,floor_id,floor_level,floor_rows,floor_cols,rack_id,rack_row,rack_col,total_u,server_id,hostname,ip,unit,height_u,services
+seoul-1,서울 DC1,1F,1,2,4,R-1F-01-01,1,1,42,srv-00001,web-sel-001,10.11.1.1,1,2,"nginx|웹플랫폼|ok; node-exporter|SRE|ok"
+seoul-1,서울 DC1,1F,1,2,4,R-1F-01-01,1,1,42,srv-00002,api-sel-002,10.11.1.2,3,1,order-api|커머스|warn
+seoul-1,서울 DC1,1F,1,2,4,R-1F-01-01,1,1,42,srv-00003,db-sel-003,10.11.1.3,10,4,postgresql|DBA|down
+seoul-1,서울 DC1,1F,1,2,4,R-1F-01-02,1,2,42,srv-00004,cache-sel-004,10.11.1.4,20,,redis|웹플랫폼|ok
+seoul-1,서울 DC1,1F,1,2,4,R-1F-02-04,2,4,42,,,,,,
+seoul-1,서울 DC1,2F,2,2,4,R-2F-01-01,1,1,42,srv-00005,batch-sel-005,10.12.1.1,5,2,
+busan-1,부산 DC2,1F,1,1,3,R-1F-01-01,1,2,42,srv-00001,web-pus-001,10.21.1.1,1,1,nginx|웹플랫폼|ok

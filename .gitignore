@@ -1,0 +1,10 @@
+node_modules
+dist
+.omc/state
+test-results
+playwright-report
+# local artifacts
+*.tar
+.omc/progress.txt
+.omc/notepads
+.omc/state

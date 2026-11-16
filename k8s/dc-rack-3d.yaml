@@ -1,0 +1,103 @@
+# dc-rack-3d: Deployment + Service + Ingress
+# Before applying, replace:
+#   image:  registry.example.com/dc-rack-3d:0.1.0   → your registry/tag
+#   host:   dc-rack-3d.example.com                   → your domain
+#   ingressClassName: nginx                          → your ingress controller's class
+# kubectl apply -n <namespace> -f k8s/dc-rack-3d.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dc-rack-3d
+  labels:
+    app.kubernetes.io/name: dc-rack-3d
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dc-rack-3d
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dc-rack-3d
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: registry.example.com/dc-rack-3d:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp            # nginx pid/cache files (root FS is read-only)
+              mountPath: /tmp
+            # Optional: serve your own data instead of the sample baked into the image.
+            # (A ConfigMap is limited to 1 MiB; for bigger files use a PVC or an initContainer download.)
+            # - name: data
+            #   mountPath: /usr/share/nginx/html/data
+            #   readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # - name: data
+        #   persistentVolumeClaim:
+        #     claimName: dc-rack-3d-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dc-rack-3d
+  labels:
+    app.kubernetes.io/name: dc-rack-3d
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dc-rack-3d
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dc-rack-3d
+  labels:
+    app.kubernetes.io/name: dc-rack-3d
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: dc-rack-3d.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: dc-rack-3d
+                port:
+                  name: http
+  # tls:
+  #   - hosts: [dc-rack-3d.example.com]
+  #     secretName: dc-rack-3d-tls
