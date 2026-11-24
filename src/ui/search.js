@@ -1,7 +1,7 @@
 import { el } from './dom.js';
 import { buildIndex, search } from '../domain/search.js';
 
-const TYPE_TAG = { hostname: '호스트', service: '서비스' };
+const TYPE_TAG = { device: '장비', rack: '랙', company: '회사' };
 const DEBOUNCE_MS = 150;
 
 /**
@@ -48,7 +48,7 @@ export function createSearch({ input, list, wrap }, store) {
     }
     list.replaceChildren(
       ...results.map((r, i) => {
-        const li = el('li', { class: 'result', 'data-type': r.type, 'data-server-id': r.serverId, 'data-dc-id': r.dcId, 'data-i': String(i) });
+        const li = el('li', { class: 'result', 'data-type': r.type, 'data-server-id': r.serverId ?? '', 'data-rack-id': r.rackId, 'data-dc-id': r.dcId, 'data-i': String(i) });
         li.append(el('span', { class: 'label' }, r.label), el('span', { class: 'sub' }, r.sub), el('span', { class: 'tag' }, TYPE_TAG[r.type]));
         return li;
       }),
@@ -63,7 +63,7 @@ export function createSearch({ input, list, wrap }, store) {
     input.value = '';
     close();
     input.blur();
-    store.navigate({ dc: r.dcId, floor: r.floorId, rack: r.rackId, server: r.serverId });
+    store.navigate({ dc: r.dcId, floor: r.floorId, rack: r.rackId, server: r.type === 'rack' ? null : r.serverId });
   }
 
   input.addEventListener('input', () => {

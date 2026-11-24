@@ -9,13 +9,14 @@
   <body>
     <div id="app">
       <div id="viewport"></div>
+      <section id="map-view" hidden></section>
       <header id="topbar">
-        <select id="dc-select" aria-label="데이터센터 선택"></select>
         <nav id="breadcrumb" aria-label="breadcrumb"></nav>
         <div id="search-wrap">
-          <input id="search" type="search" placeholder="호스트명 / 서비스명 검색" autocomplete="off" spellcheck="false" />
+          <input id="search" type="search" placeholder="장비명 / 랙 / 회사 검색" autocomplete="off" spellcheck="false" />
           <ul id="search-results" hidden></ul>
         </div>
+        <button id="theme-toggle" type="button"></button>
         <div id="warnings-wrap">
           <button id="warnings" type="button" hidden></button>
           <ul id="warnings-list" hidden></ul>

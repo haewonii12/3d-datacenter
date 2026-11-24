@@ -1,15 +1,16 @@
-import { rackLabel, unitRangeLabel } from '../domain/layout.js';
+import { rackLabel, rackCellsLabel, unitRangeLabel, deviceLabel } from '../domain/layout.js';
 import { usedU } from '../domain/occupancy.js';
 
-/** `R03-C12 · 2F · 31/42U (74%)` */
-export function rackTooltipText(rack, floorId) {
+/** `RI20261120 · 3A0401–02 · 31/42U (74%)` (+ ` · ⚠ 위반` when flagged) */
+export function rackTooltipText(rack) {
   const used = usedU(rack);
-  return `${rackLabel(rack)} · ${floorId} · ${used}/${rack.total_u}U (${Math.round((used / rack.total_u) * 100)}%)`;
+  const warn = rack.violation ? ' · ⚠ 위반' : '';
+  return `${rackLabel(rack)} · ${rackCellsLabel(rack)} · ${used}/${rack.total_u}U (${Math.round((used / rack.total_u) * 100)}%)${warn}`;
 }
 
-/** `hostname · U10–11` */
+/** `device_name · company · U29–31` */
 export function serverTooltipText(server) {
-  return `${server.hostname} · ${unitRangeLabel(server)}`;
+  return [deviceLabel(server), server.company, unitRangeLabel(server)].filter(Boolean).join(' · ') + (server.violation ? ' · ⚠ 위반' : '');
 }
 
 /** #tooltip near the cursor; text via textContent only. */
@@ -24,7 +25,7 @@ export function createTooltip(root, store) {
     if (hit && at) {
       if (hit.kind === 'rack' && (mode === 'overview' || mode === 'floor')) {
         const r = store.getRack(hit.id);
-        if (r) text = rackTooltipText(r.rack, r.floor.id);
+        if (r) text = rackTooltipText(r.rack);
       } else if (hit.kind === 'server' && (mode === 'rack' || mode === 'server')) {
         const s = store.getServer(hit.id);
         if (s) text = serverTooltipText(s.server);

@@ -1,17 +1,20 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { boot, settled, dc, state, reach } from './helpers.js';
-import { normalize } from '../../src/data/schema.js';
+import { boot, bootMap, settled, dc, state, reach, loadSample, FIRST_DC, trackErrors } from './helpers.js';
 import { floorStats } from '../../src/domain/occupancy.js';
 import { rackLabel } from '../../src/domain/layout.js';
 
-const data = normalize(JSON.parse(readFileSync(new URL('../../public/data/datacenter.json', import.meta.url), 'utf8')));
+const data = loadSample();
 const DC = Object.fromEntries(data.datacenters.map((d) => [d.id, d]));
+const [GS, YDP, PJ] = data.datacenters.map((d) => d.id);
 const pct = (avg) => `${Math.round(avg * 100)}%`;
 const VIEW = { w: 1280, h: 720, top: 44 }; // playwright viewport; the top bar covers y < 44
 
 const at = (dcId, o = {}) => ({ dc: dcId, floor: null, rack: null, server: null, ...o });
 const inView = (p) => p && p.x > 0 && p.x < VIEW.w && p.y > VIEW.top && p.y < VIEW.h;
+const hash = (page) => page.evaluate(() => location.hash);
+const goDc = (page, id) => page.evaluate((x) => window.__dc.navigate({ dc: x }), id);
+const rackCount = (d) => d.floors.reduce((a, f) => a + f.racks.length, 0);
+const deviceCount = (d) => d.floors.reduce((a, f) => a + f.racks.reduce((b, r) => b + r.servers.length, 0), 0);
 
 /** The racks nearest to each corner of a floor's grid (corner slots may be empty). */
 function cornerRacks(floor) {
@@ -19,11 +22,6 @@ function cornerRacks(floor) {
   return corners.map(([row, col]) =>
     floor.racks.reduce((best, r) => (Math.hypot(r.row - row, r.col - col) < Math.hypot(best.row - row, best.col - col) ? r : best)),
   );
-}
-
-async function selectDc(page, id) {
-  await page.locator('#dc-select').selectOption(id);
-  await reach(page, at(id));
 }
 
 /** Overview of `dcId`: exactly its floor labels (no stale ones), texts from floorStats, all on screen. */
@@ -40,194 +38,199 @@ async function expectOverview(page, dcId) {
   }
   expect(await dc(page, () => window.__dc.builtDc())).toBe(dcId);
   expect(await dc(page, () => window.__dc.builtFloorIds())).toEqual(d.floors.map((f) => f.id));
-  await expect(page.locator('#dc-select')).toHaveValue(dcId);
-  await expect(page.locator('#breadcrumb')).toHaveText(d.name);
+  await expect(page.locator('#breadcrumb')).toHaveText(`지도>${d.name}`);
 }
 
 test.describe('multiple datacenters', () => {
-  let consoleErrors;
+  let errors;
   test.beforeEach(({ page }) => {
-    consoleErrors = [];
-    page.on('console', (m) => m.type() === 'error' && consoleErrors.push(m.text()));
-    page.on('pageerror', (e) => consoleErrors.push(String(e)));
+    errors = trackErrors(page);
   });
-  test.afterEach(() => expect(consoleErrors).toEqual([]));
+  test.afterEach(() => expect(errors).toEqual([]));
 
-  test('selector lists the 3 DCs (name + counts title) and starts on the first', async ({ page }) => {
-    await boot(page);
-    expect(await dc(page, () => window.__dc.dcIds())).toEqual(['seoul-1', 'busan-1', 'daejeon-1']);
-    expect(await dc(page, () => window.__dc.currentDc())).toBe('seoul-1');
-    const opts = page.locator('#dc-select option');
-    await expect(opts).toHaveCount(3);
+  test('the map lists the 3 DCs (pins + side list with counts); a pin opens that DC overview', async ({ page }) => {
+    await bootMap(page);
+    expect(await dc(page, () => window.__dc.dcIds())).toEqual([GS, YDP, PJ]);
+    expect(await dc(page, () => window.__dc.currentDc())).toBeNull();
+    expect(await dc(page, () => window.__dc.mode())).toBe('map');
+    expect(await hash(page)).toBe('#map');
+    await expect(page.locator('.map-pin[data-dc]')).toHaveCount(3);
+    const items = page.locator('.map-item');
+    await expect(items).toHaveCount(3);
     for (const [i, d] of data.datacenters.entries()) {
-      await expect(opts.nth(i)).toHaveAttribute('value', d.id);
-      await expect(opts.nth(i)).toHaveText(d.name);
-      const racks = d.floors.reduce((a, f) => a + f.racks.length, 0);
-      await expect(opts.nth(i)).toHaveAttribute('title', new RegExp(`^${d.floors.length}개 층 · 랙 ${racks} · `));
+      await expect(items.nth(i)).toHaveAttribute('data-dc', d.id);
+      await expect(items.nth(i).locator('.name')).toHaveText(d.name);
+      await expect(items.nth(i).locator('.meta')).toHaveText(`층 ${d.floors.length} · 랙 ${rackCount(d)} · 장비 ${deviceCount(d)}`);
     }
-    expect(await page.evaluate(() => location.hash)).toBe('#dc=seoul-1');
-    await expectOverview(page, 'seoul-1');
+    await page.locator(`.map-pin[data-dc="${YDP}"] .pin-dot`).click();
+    await reach(page, at(YDP));
+    expect(await hash(page)).toBe(`#dc=${encodeURIComponent(YDP)}`);
+    await expectOverview(page, YDP);
   });
 
-  test('switch to busan-1: 3 floor labels with its stats, hash dc=busan-1, nothing stale; back restores seoul-1', async ({ page }) => {
+  test('map side list opens a DC; breadcrumb 지도 and ESC return to the map', async ({ page }) => {
+    await bootMap(page);
+    await page.locator(`.map-item[data-dc="${PJ}"]`).click();
+    await reach(page, at(PJ));
+    await expectOverview(page, PJ);
+    await page.locator('#breadcrumb [data-level=root]').click();
+    await reach(page, at(null));
+    expect(await dc(page, () => window.__dc.mode())).toBe('map');
+    await expect(page.locator('#map-view')).toBeVisible();
+    await page.locator(`.map-item[data-dc="${GS}"]`).click();
+    await reach(page, at(GS));
+    await page.keyboard.press('Escape');
+    await reach(page, at(null));
+    await expect(page.locator('#map-view')).toBeVisible();
+  });
+
+  test(`switch to ${YDP}: its floor labels, hash, nothing stale; history back/forward; GPU memory returns`, async ({ page }) => {
     await boot(page);
+    await expect(page.locator('#map-view')).toBeHidden();
+    await expectOverview(page, GS);
     const mem0 = await dc(page, () => window.__dc.gpuMemory());
-    await selectDc(page, 'busan-1');
-    expect(await page.evaluate(() => location.hash)).toBe('#dc=busan-1');
-    await expectOverview(page, 'busan-1');
-    // Only busan's racks are built and visible.
-    const ids = await dc(page, () => window.__dc.visibleRackIds());
-    expect(ids.length).toBe(DC['busan-1'].floors.reduce((a, f) => a + f.racks.length, 0));
+    await goDc(page, YDP);
+    await reach(page, at(YDP));
+    expect(await hash(page)).toBe(`#dc=${encodeURIComponent(YDP)}`);
+    await expectOverview(page, YDP);
+    // Only this DC's racks are built and visible.
+    expect((await dc(page, () => window.__dc.visibleRackIds())).length).toBe(rackCount(DC[YDP]));
 
     await page.goBack();
-    await reach(page, at('seoul-1'));
-    await expectOverview(page, 'seoul-1');
+    await reach(page, at(GS));
+    await expectOverview(page, GS);
     await page.goForward();
-    await reach(page, at('busan-1'));
-    await expectOverview(page, 'busan-1');
+    await reach(page, at(YDP));
+    await expectOverview(page, YDP);
 
-    // Back to seoul via the selector: GPU geometries/textures return to the first build (old DC disposed).
-    await selectDc(page, 'seoul-1');
+    // Back to the first DC: GPU geometries/textures return to the first build (old DC disposed).
+    await goDc(page, GS);
+    await reach(page, at(GS));
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
     expect(await dc(page, () => window.__dc.gpuMemory())).toEqual(mem0);
   });
 
   test('rack/server state survives a switch away and back (back button restores the previous DC deep state)', async ({ page }) => {
-    const f = DC['busan-1'].floors[1];
+    const f = DC[YDP].floors[1];
     const rack = f.racks.find((r) => r.servers.length >= 4);
     const server = rack.servers[1];
-    await boot(page, `#dc=busan-1&server=${server.id}`);
-    await reach(page, at('busan-1', { floor: f.id, rack: rack.id, server: server.id }));
-    await expect(page.locator('#server-detail [data-k=dc]')).toHaveText('부산 DC2');
-    await expect(page.locator('#server-detail [data-k=hostname]')).toHaveText(server.hostname);
-    await expect(page.locator('#breadcrumb')).toHaveText(`부산 DC2>${f.id}>${rackLabel(rack)}>${server.hostname}`);
-    await page.locator('#dc-select').selectOption('daejeon-1');
-    await reach(page, at('daejeon-1'));
+    await boot(page, `#dc=${encodeURIComponent(YDP)}&server=${encodeURIComponent(server.id)}`);
+    await reach(page, at(YDP, { floor: f.id, rack: rack.id, server: server.id }));
+    await expect(page.locator('#server-detail [data-k=build_name]')).toHaveText(DC[YDP].name);
+    await expect(page.locator('#server-detail [data-k=device_name]')).toHaveText(server.device_name);
+    await expect(page.locator('#breadcrumb')).toHaveText(`지도>${DC[YDP].name}>${f.id}>${rackLabel(rack)}>${server.device_name}`);
+    await goDc(page, PJ);
+    await reach(page, at(PJ));
     await expect(page.locator('#panel')).toBeHidden();
     await expect(page.locator('#server-detail')).toBeHidden();
     expect(await dc(page, () => window.__dc.selectedRackId())).toBeNull();
     await page.goBack();
-    await reach(page, at('busan-1', { floor: f.id, rack: rack.id, server: server.id }));
+    await reach(page, at(YDP, { floor: f.id, rack: rack.id, server: server.id }));
     expect(await dc(page, () => window.__dc.selectedRackId())).toBe(rack.id);
-    await expect(page.locator('#dc-select')).toHaveValue('busan-1');
-    await expect(page.locator('#server-detail [data-k=hostname]')).toHaveText(server.hostname);
+    await expect(page.locator('#server-detail [data-k=device_name]')).toHaveText(server.device_name);
   });
 
-  test('camera frames the stack (overview) and daejeon-1 larger floors (floor mode corner racks)', async ({ page }) => {
+  test(`camera frames the stack (overview) and ${PJ} larger floors (floor mode corner racks)`, async ({ page }) => {
     await boot(page);
-    await expectOverview(page, 'seoul-1');
-    await selectDc(page, 'daejeon-1');
-    await expectOverview(page, 'daejeon-1');
-    for (const f of DC['daejeon-1'].floors) {
+    await expectOverview(page, GS);
+    await goDc(page, PJ);
+    await reach(page, at(PJ));
+    await expectOverview(page, PJ);
+    for (const f of DC[PJ].floors) {
       await page.evaluate((id) => window.__dc.navigate({ floor: id }), f.id);
-      await reach(page, at('daejeon-1', { floor: f.id }));
+      await reach(page, at(PJ, { floor: f.id }));
       for (const r of cornerRacks(f)) {
         const p = await dc(page, (id) => window.__dc.rackScreenPos(id), r.id);
         expect(inView(p), `${f.id} ${r.id} at ${JSON.stringify(p)}`).toBe(true);
       }
     }
-    await selectDc(page, 'busan-1');
-    await expectOverview(page, 'busan-1');
+    await goDc(page, YDP);
+    await reach(page, at(YDP));
+    await expectOverview(page, YDP);
   });
 
-  test('deep link #dc=daejeon-1&floor=2F&rack=<id> opens that rack', async ({ page }) => {
-    const f = DC['daejeon-1'].floors.find((x) => x.id === '2F');
+  test('deep link #dc=<DC>&floor=2F&rack=<id> opens that rack', async ({ page }) => {
+    const f = DC[PJ].floors.find((x) => x.id === '2F');
     const rack = f.racks.find((r) => r.servers.length >= 6);
-    await boot(page, `#dc=daejeon-1&floor=2F&rack=${rack.id}`);
-    await reach(page, at('daejeon-1', { floor: '2F', rack: rack.id }));
+    await boot(page, `#dc=${encodeURIComponent(PJ)}&floor=2F&rack=${encodeURIComponent(rack.id)}`);
+    await reach(page, at(PJ, { floor: '2F', rack: rack.id }));
     expect(await dc(page, () => window.__dc.mode())).toBe('rack');
     expect(await dc(page, () => window.__dc.selectedRackId())).toBe(rack.id);
-    await expect(page.locator('#dc-select')).toHaveValue('daejeon-1');
     await expect(page.locator('#elevation h2')).toHaveText(`${rackLabel(rack)} · 2F`);
     await expect(page.locator('#elevation .elev-server')).toHaveCount(rack.servers.length);
-    // Same id in seoul-1 is a different rack: the elevation must follow the DC, not just the rack id.
-    const twin = DC['seoul-1'].floors.find((x) => x.id === '2F').racks.find((r) => r.id === rack.id);
-    if (twin) {
-      await page.locator('#dc-select').selectOption('seoul-1');
-      await reach(page, at('seoul-1'));
-      await page.evaluate((id) => window.__dc.navigate({ rack: id }), rack.id);
-      await reach(page, at('seoul-1', { floor: '2F', rack: rack.id }));
-      await expect(page.locator('#elevation .elev-server')).toHaveCount(twin.servers.length);
-      await expect(page.locator(`#elevation [data-server-id="${twin.servers[0].id}"] .host`)).toHaveText(twin.servers[0].hostname);
-    }
+    await expect(page.locator(`#elevation [data-server-id="${rack.servers[0].id}"] .host`)).toHaveText(rack.servers[0].device_name);
   });
 
-  test('unknown dc falls back to the first DC with the URL rewritten', async ({ page }) => {
+  test('unknown dc falls back to the map with the URL rewritten', async ({ page }) => {
     await boot(page, '#dc=nowhere&floor=2F');
-    await reach(page, at('seoul-1'));
-    expect(await page.evaluate(() => location.hash)).toBe('#dc=seoul-1');
-    await expectOverview(page, 'seoul-1');
+    await reach(page, at(null));
+    expect(await hash(page)).toBe('#map');
+    await expect(page.locator('#map-view')).toBeVisible();
   });
 
-  test('legacy hash without dc opens the first DC', async ({ page }) => {
-    const rack = DC['seoul-1'].floors.find((x) => x.id === '2F').racks[5];
-    await boot(page, `#floor=2F&rack=${rack.id}`);
-    await reach(page, at('seoul-1', { floor: '2F', rack: rack.id }));
-    expect(await page.evaluate(() => location.hash)).toBe(`#dc=seoul-1&floor=2F&rack=${rack.id}`);
+  test('a hash without dc (old style) opens the map', async ({ page }) => {
+    const rack = DC[GS].floors.find((x) => x.id === '2F').racks[5];
+    await boot(page, `#floor=2F&rack=${encodeURIComponent(rack.id)}`);
+    await reach(page, at(null));
+    expect(await hash(page)).toBe('#map');
   });
 
-  test('legacy v1 single-DC file loads as dc "default" and its legacy hash works', async ({ page }) => {
-    const v1 = {
-      version: 1,
-      name: '구버전 DC',
-      floors: [
-        { id: '1F', level: 1, rows: 2, cols: 2, racks: [{ id: 'R1', row: 1, col: 1, servers: [{ id: 's1', hostname: 'old-01', unit: 1, height_u: 2 }] }] },
-        { id: '2F', level: 2, rows: 3, cols: 4, racks: [{ id: 'R2', row: 2, col: 3, servers: [] }] },
-      ],
-    };
+  test('a single-DC records file with an unregistered build name lists it beside the map and opens it', async ({ page }) => {
+    const records = [
+      { build_name: '신규IDC', floorspace_name: '1A0101', company: '테스트', rack_name: 'RK1', device_position: '2U (1-2)', device_name: 'new-01' },
+      { build_name: '신규IDC', floorspace_name: '2A0102', company: '테스트', rack_name: 'RK2', device_position: '', device_name: '' },
+    ];
     await page.route('**/data/datacenter.json', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(v1) }),
+      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(records) }),
     );
-    await page.goto('/?debug=1#floor=1F&rack=R1');
-    await expect(page.locator('#app')).toHaveAttribute('data-ready', 'ok');
-    await expect.poll(() => state(page)).toEqual(at('default', { floor: '1F', rack: 'R1' }));
+    await bootMap(page);
+    expect(await dc(page, () => window.__dc.dcIds())).toEqual(['신규IDC']);
+    await expect(page.locator('.map-item.unknown')).toHaveCount(1);
+    await expect(page.locator('.map-pin[data-dc]')).toHaveCount(0);
+    await page.locator('.map-item[data-dc="신규IDC"]').click();
+    await expect.poll(() => state(page)).toEqual(at('신규IDC'));
     await settled(page);
-    expect(await dc(page, () => window.__dc.dcIds())).toEqual(['default']);
-    expect(await page.evaluate(() => location.hash)).toBe('#dc=default&floor=1F&rack=R1');
-    await expect(page.locator('#dc-select option')).toHaveText(['구버전 DC']);
-    await expect(page.locator('#breadcrumb [data-level=root]')).toHaveText('구버전 DC');
+    await expect(page.locator('.floor-label')).toHaveCount(2);
+    await dc(page, () => window.__dc.navigate({ rack: 'RK1' }));
+    await expect.poll(() => state(page)).toEqual(at('신규IDC', { floor: '1F', rack: 'RK1' }));
     await expect(page.locator('#elevation .elev-server')).toHaveCount(1);
-    await expect(page.locator('#warnings')).toBeHidden();
   });
 
-  test('search finds a hostname that only exists in another DC, switches DC and opens the server', async ({ page }) => {
-    const f = DC['busan-1'].floors[2];
+  test('search finds a device that only exists in another DC, switches DC and opens the device', async ({ page }) => {
+    const f = DC[YDP].floors[2];
     const rack = f.racks.find((r) => r.servers.length >= 3);
     const server = rack.servers[2];
-    expect(server.hostname).toContain('-pus-');
     await boot(page);
-    await page.locator('#search').fill(server.hostname);
+    await page.locator('#search').fill(server.device_name);
     const first = page.locator('#search-results .result.active');
     await expect(first).toHaveAttribute('data-server-id', server.id);
-    await expect(first).toHaveAttribute('data-dc-id', 'busan-1');
-    await expect(first.locator('.sub')).toHaveText(`${rack.id} · 부산 DC2`);
+    await expect(first).toHaveAttribute('data-dc-id', YDP);
+    await expect(first.locator('.sub')).toHaveText(`${rack.name} · ${rack.floorspaces.join(',')} · ${DC[YDP].name}`);
     await page.keyboard.press('Enter');
-    await reach(page, at('busan-1', { floor: f.id, rack: rack.id, server: server.id }));
-    expect(await dc(page, () => window.__dc.builtDc())).toBe('busan-1');
+    await reach(page, at(YDP, { floor: f.id, rack: rack.id, server: server.id }));
+    expect(await dc(page, () => window.__dc.builtDc())).toBe(YDP);
     expect(await dc(page, () => window.__dc.selectedRackId())).toBe(rack.id);
-    await expect(page.locator('#dc-select')).toHaveValue('busan-1');
-    await expect(page.locator('#server-detail [data-k=hostname]')).toHaveText(server.hostname);
-    await expect(page.locator('#server-detail [data-k=dc]')).toHaveText('부산 DC2');
-    // Server mode hides every floor label; CSS2DRenderer only attaches labels it has drawn, and seoul's are gone.
-    expect(await dc(page, () => window.__dc.builtFloorIds())).toEqual(DC['busan-1'].floors.map((x) => x.id));
-    expect(await page.locator('.floor-label').count()).toBeLessThanOrEqual(DC['busan-1'].floors.length);
-    // Same-DC results have no DC suffix now that busan-1 is current.
-    await page.locator('#search').fill(server.hostname);
-    await expect(page.locator('#search-results .result.active .sub')).toHaveText(rack.id);
+    await expect(page.locator('#server-detail [data-k=device_name]')).toHaveText(server.device_name);
+    await expect(page.locator('#server-detail [data-k=build_name]')).toHaveText(DC[YDP].name);
+    expect(await dc(page, () => window.__dc.builtFloorIds())).toEqual(DC[YDP].floors.map((x) => x.id));
+    expect(await page.locator('.floor-label').count()).toBeLessThanOrEqual(DC[YDP].floors.length);
+    // Same-DC results have no DC suffix now that this DC is current.
+    await page.locator('#search').fill(server.device_name);
+    await expect(page.locator('#search-results .result.active .sub')).toHaveText(`${rack.name} · ${rack.floorspaces.join(',')}`);
   });
 
-  test('breadcrumb root shows the DC name and goes to that DC overview', async ({ page }) => {
-    const f = DC['daejeon-1'].floors[0];
+  test('breadcrumb DC crumb shows the DC name and goes to that DC overview', async ({ page }) => {
+    const f = DC[PJ].floors[0];
     const rack = f.racks.find((r) => r.servers.length >= 2);
-    await boot(page, `#dc=daejeon-1&rack=${rack.id}`);
-    await reach(page, at('daejeon-1', { floor: f.id, rack: rack.id }));
-    const root = page.locator('#breadcrumb [data-level=root]');
-    await expect(root).toHaveText('대전 DC3');
-    await expect(page.locator('#breadcrumb')).toHaveText(`대전 DC3>${f.id}>${rackLabel(rack)}`);
-    await root.click();
-    await reach(page, at('daejeon-1'));
+    await boot(page, `#dc=${encodeURIComponent(PJ)}&rack=${encodeURIComponent(rack.id)}`);
+    await reach(page, at(PJ, { floor: f.id, rack: rack.id }));
+    const crumb = page.locator('#breadcrumb [data-level=dc]');
+    await expect(crumb).toHaveText(DC[PJ].name);
+    await expect(page.locator('#breadcrumb')).toHaveText(`지도>${DC[PJ].name}>${f.id}>${rackLabel(rack)}`);
+    await crumb.click();
+    await reach(page, at(PJ));
     expect(await dc(page, () => window.__dc.mode())).toBe('overview');
-    await expectOverview(page, 'daejeon-1');
-    for (const x of DC['daejeon-1'].floors) expect(await dc(page, (id) => window.__dc.floorOpacity(id), x.id)).toBe(1);
+    await expectOverview(page, PJ);
+    for (const x of DC[PJ].floors) expect(await dc(page, (id) => window.__dc.floorOpacity(id), x.id)).toBe(1);
   });
 });

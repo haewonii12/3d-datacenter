@@ -1,7 +1,10 @@
 import { el } from './dom.js';
-import { rackLabel } from '../domain/layout.js';
+import { rackLabel, deviceLabel } from '../domain/layout.js';
 
-/** `{DC name} > 2F > R03-C12 > {hostname}`; each item is a `[data-level]` button → store.goLevel (root = DC overview). */
+/**
+ * `지도 > {DC name} > 2F > {rack name} > {device name}`; each item is a `[data-level]` button → store.goLevel
+ * (root = the map, dc = the DC overview).
+ */
 export function createBreadcrumb(root, store) {
   root.addEventListener('click', (e) => {
     const b = e.target.closest('[data-level]');
@@ -9,12 +12,14 @@ export function createBreadcrumb(root, store) {
   });
 
   function render(state) {
-    const parts = [['root', store.getDc(state.dc)?.name ?? '데이터센터']];
+    const parts = [['root', '지도']];
+    const dc = state.dc != null ? store.getDc(state.dc) : null;
+    if (dc) parts.push(['dc', dc.name]);
     if (state.floor) parts.push(['floor', state.floor]);
     const r = state.rack && store.getRack(state.rack);
     if (r) parts.push(['rack', rackLabel(r.rack)]);
     const s = state.server && store.getServer(state.server);
-    if (s) parts.push(['server', s.server.hostname]);
+    if (s) parts.push(['server', deviceLabel(s.server)]);
     const nodes = [];
     parts.forEach(([level, text], i) => {
       if (i) nodes.push(el('span', { class: 'sep' }, '>'));

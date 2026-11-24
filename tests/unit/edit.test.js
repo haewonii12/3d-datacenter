@@ -1,178 +1,96 @@
 import { describe, it, expect } from 'vitest';
 import {
-  EditError, addFloor, addDc, deleteFloor, deleteDc, countUnder, nextFloorDefaults, defaultDcId, updateServer, addServer, deleteServer, addRack, deleteRack, renameDc, toPlain, nextServerId, defaultRackId, firstEmptySlot,
+  EditError, addFloor, addDc, deleteFloor, deleteDc, countUnder, nextFloorDefaults, updateServer, addServer, deleteServer, addRack, deleteRack, renameDc, toPlain, defaultRackId, firstEmptySlot,
 } from '../../src/data/edit.js';
 import { validate, normalize } from '../../src/data/schema.js';
 
-const base = () => normalize({ version: 2, datacenters: [
-  { id: 'd1', name: 'DC1', floors: [{ id: '1F', rows: 2, cols: 2, racks: [
-    { id: 'RA', row: 1, col: 1, total_u: 42, servers: [
-      { id: 'srv-00001', hostname: 'a', ip: '10.0.0.1', unit: 1, height_u: 2, services: [{ name: 'nginx', team: 'web', status: 'ok' }] },
-      { id: 'srv-00007', hostname: 'b', ip: null, unit: 10, height_u: 1, services: [] },
-    ] },
+const dev = (id, device_position, device_name = id) => ({ id, device_name, company: '해원회사', device_position });
+const base = () => normalize({ version: 3, datacenters: [
+  { id: '가산IDC', name: '가산IDC', floors: [{ id: '3F', level: 3, racks: [
+    { id: 'RA', floorspaces: ['3A0101', '3A0102'], servers: [dev('RA:29-31:0', '3U (29-31)', 'web'), dev('RA:10-10:0', '1U (10-10)', 'db')] },
+    { id: 'RB', floorspaces: ['3A0104'], servers: [] },
   ] }] },
-  { id: 'd2', name: 'DC2', floors: [{ id: '1F', rows: 1, cols: 1, racks: [{ id: 'RA', row: 1, col: 1, servers: [{ id: 'srv-00001', hostname: 'a', unit: 1 }] }] }] },
+  { id: '파주IDC', name: '파주IDC', floors: [{ id: '2F', level: 2, racks: [{ id: 'RA', floorspaces: ['2A0101'], servers: [] }] }] },
 ] });
-const rackA = (d, dc = 'd1') => d.datacenters.find((x) => x.id === dc).floors[0].racks.find((r) => r.id === 'RA');
+const rackOf = (d, id, dc = '가산IDC') => d.datacenters.find((x) => x.id === dc).floors.flatMap((f) => f.racks).find((r) => r.id === id);
 const err = (fn, re) => {
   expect(fn).toThrow(EditError);
   expect(fn).toThrow(re);
 };
+const check = (d) => validate(toPlain(d));
 
 describe('edit ops', () => {
-  it('never mutate the input and keep the result valid', () => {
+  it('never mutate the input; the result stays valid', () => {
     const d = base();
     const snap = JSON.stringify(d);
-    const out = updateServer(d, 'd1', 'srv-00001', { hostname: 'a2', unit: '3', height_u: '1' });
+    const out = updateServer(d, '가산IDC', 'RA:10-10:0', { device_name: 'db2', company: '누리텍', device_position: '2u(11-12)' });
     expect(JSON.stringify(d)).toBe(snap);
-    expect(rackA(out).servers[0]).toMatchObject({ hostname: 'a2', unit: 3, height_u: 1 });
-    expect(validate(out)).toMatchObject({ fatal: [], warnings: [] });
+    expect(rackOf(out, 'RA').servers[1]).toMatchObject({ device_name: 'db2', company: '누리텍', device_position: '2U (11-12)' });
+    expect(check(out)).toMatchObject({ fatal: [], warnings: [] });
   });
-  it('updateServer: overlap, range, hostname rules (ids/hostnames scoped to the DC)', () => {
+  it('updateServer refuses unplaceable positions, but saves overlaps (they become warnings)', () => {
     const d = base();
-    err(() => updateServer(d, 'd1', 'srv-00001', { unit: 9, height_u: 2 }), /겹칩니다/);
-    err(() => updateServer(d, 'd1', 'srv-00001', { unit: 42, height_u: 2 }), /범위\(1–42\)/);
-    err(() => updateServer(d, 'd1', 'srv-00001', { unit: 0 }), /1 이상의 정수/);
-    err(() => updateServer(d, 'd1', 'srv-00001', { unit: '2.5' }), /정수/);
-    err(() => updateServer(d, 'd1', 'srv-00001', { hostname: '  ' }), /호스트명/);
-    err(() => updateServer(d, 'd1', 'srv-00001', { hostname: 'b' }), /이미 있습니다/);
-    err(() => updateServer(d, 'd1', 'nope', {}), /없습니다/);
-    // same height range as itself is fine; another DC's hostname "a" does not clash
-    expect(rackA(updateServer(d, 'd1', 'srv-00001', { unit: 1, height_u: 2 })).servers[0].unit).toBe(1);
-    expect(rackA(updateServer(d, 'd2', 'srv-00001', { hostname: 'b' }), 'd2').servers[0].hostname).toBe('b');
+    err(() => updateServer(d, '가산IDC', 'RA:10-10:0', { device_position: 'abc' }), /형식/);
+    err(() => updateServer(d, '가산IDC', 'RA:10-10:0', { device_position: '2U (5-7)' }), /높이/);
+    err(() => updateServer(d, '가산IDC', 'RA:10-10:0', { device_position: '1U (43-43)' }), /범위/);
+    err(() => updateServer(d, '가산IDC', 'RA:10-10:0', { device_name: ' ' }), /장비 이름/);
+    err(() => updateServer(d, '가산IDC', 'nope', {}), /없습니다/);
+    const overlap = updateServer(d, '가산IDC', 'RA:10-10:0', { device_position: '1U (30-30)' });
+    expect(check(overlap).warnings.map((w) => w.kind)).toEqual(['mount-overlap']);
   });
-  it('updateServer: services are cleaned (trimmed, team optional, bad status → unknown)', () => {
-    const out = updateServer(base(), 'd1', 'srv-00001', {
-      ip: ' ',
-      services: [{ name: ' api ', team: '', status: 'down' }, { name: 'x', team: 't', status: 'weird' }],
-    });
-    const s = rackA(out).servers[0];
-    expect(s.ip).toBe(null);
-    expect(s.services).toEqual([{ name: 'api', team: null, status: 'down' }, { name: 'x', team: 't', status: 'unknown' }]);
-    err(() => updateServer(base(), 'd1', 'srv-00001', { services: [{ name: '', team: 't' }] }), /서비스 1 이름/);
-  });
-  it('updateServer clears a stale invalid flag', () => {
-    const d = base();
-    rackA(d).servers[0].invalid = true;
-    expect(rackA(updateServer(d, 'd1', 'srv-00001', {})).servers[0].invalid).toBeUndefined();
-  });
-  it('addServer: next srv id in the DC, sorted by unit, U checks', () => {
-    const d = base();
-    expect(nextServerId(d.datacenters[0])).toBe('srv-00008');
-    const { data, serverId } = addServer(d, 'd1', 'RA', { hostname: 'c', unit: '5', height_u: '3', ip: '10.0.0.3' });
-    expect(serverId).toBe('srv-00008');
-    expect(rackA(data).servers.map((s) => s.unit)).toEqual([1, 5, 10]);
-    expect(rackA(data).servers[1]).toEqual({ id: 'srv-00008', hostname: 'c', ip: '10.0.0.3', unit: 5, height_u: 3, services: [] });
-    err(() => addServer(d, 'd1', 'RA', { hostname: 'c', unit: 2 }), /겹칩니다/);
-    err(() => addServer(d, 'd1', 'RA', { hostname: 'a', unit: 20 }), /이미 있습니다/);
-    err(() => addServer(d, 'd1', 'RX', { hostname: 'c', unit: 20 }), /랙 "RX"/);
+  it('addServer: id per the record rule; boundary share allowed', () => {
+    const { data, serverId } = addServer(base(), '가산IDC', 'RA', { device_name: 'cache', company: '', device_position: '2U (31-32)' });
+    expect(serverId).toBe('RA:31-32:0');
+    expect(check(data)).toMatchObject({ fatal: [], warnings: [] });
+    const again = addServer(data, '가산IDC', 'RA', { device_name: 'x', device_position: '2U (31-32)' });
+    expect(again.serverId).toBe('RA:31-32:1');
+    expect(check(again.data).warnings.map((w) => w.kind)).toEqual(['mount-overlap', 'mount-crowded']); // 3 devices on U31
+    err(() => addServer(base(), '가산IDC', 'RA', { device_name: 'x', device_position: '' }), /장착 위치/);
   });
   it('deleteServer / deleteRack', () => {
-    expect(rackA(deleteServer(base(), 'd1', 'srv-00007')).servers.map((s) => s.id)).toEqual(['srv-00001']);
-    const out = deleteRack(base(), 'd1', 'RA');
-    expect(out.datacenters[0].floors[0].racks).toEqual([]);
-    expect(out.datacenters[1].floors[0].racks).toHaveLength(1); // same id in the other DC untouched
-    err(() => deleteRack(base(), 'd1', 'RZ'), /없습니다/);
+    const d = deleteServer(base(), '가산IDC', 'RA:29-31:0');
+    expect(rackOf(d, 'RA').servers.map((s) => s.id)).toEqual(['RA:10-10:0']);
+    expect(rackOf(deleteRack(base(), '가산IDC', 'RB'), 'RB')).toBeUndefined();
+    err(() => deleteRack(base(), '가산IDC', 'nope'), /없습니다/);
   });
-  it('addRack: slot checks, default id pattern, explicit id uniqueness', () => {
+  it('addRack: floorspace codes on this floor, contiguous, never on a taken cell', () => {
     const d = base();
-    const { data, rackId } = addRack(d, 'd1', '1F', { row: 2, col: 1 });
-    expect(rackId).toBe('R-1F-02-01');
-    expect(data.datacenters[0].floors[0].racks.map((r) => r.id)).toEqual(['RA', 'R-1F-02-01']);
-    expect(data.datacenters[0].floors[0].racks[1]).toEqual({ id: 'R-1F-02-01', row: 2, col: 1, total_u: 42, servers: [] });
-    err(() => addRack(d, 'd1', '1F', { row: 1, col: 1 }), /이미 랙이 있습니다/);
-    err(() => addRack(d, 'd1', '1F', { row: 3, col: 1 }), /그리드\(2×2\) 밖/);
-    err(() => addRack(d, 'd1', '1F', { row: 1, col: 2, id: 'RA' }), /이미 있습니다/);
-    err(() => addRack(d, 'd1', '9F', { row: 1, col: 2 }), /층 "9F"/);
-    expect(addRack(d, 'd1', '1F', { row: 1, col: 2, id: ' R-x ' }).rackId).toBe('R-x');
+    const { data, rackId } = addRack(d, '가산IDC', '3F', { floorspaces: '3B0201, 3B0202', name: '' });
+    expect(rackId).toBe('RI-3B0201');
+    const r = rackOf(normalize(toPlain(data)), 'RI-3B0201');
+    expect(r).toMatchObject({ floorspaces: ['3B0201', '3B0202'], span: 2, zone: 'B' });
+    err(() => addRack(d, '가산IDC', '3F', { floorspaces: '3A0102' }), /이미 랙 RA/);
+    err(() => addRack(d, '가산IDC', '3F', { floorspaces: '2A0105' }), /층 번호는 3/);
+    err(() => addRack(d, '가산IDC', '3F', { floorspaces: '3A0105,3A0107' }), /연속/);
+    err(() => addRack(d, '가산IDC', '3F', { floorspaces: 'zz' }), /형식/);
+    err(() => addRack(d, '가산IDC', '3F', { floorspaces: '3A0201', name: 'RB' }), /이미 있습니다/);
+    expect(defaultRackId(d.datacenters[0], '3A0104')).toBe('RI-3A0104');
   });
-  it('defaultRackId suffixes a taken id; firstEmptySlot is row-major', () => {
+  it('firstEmptySlot: first free cell of the zones (gap columns are not cells)', () => {
+    const f = base().datacenters[0].floors[0];
+    expect(firstEmptySlot(f)).toEqual({ row: 1, col: 3, floorspace: '3A0103' });
+  });
+  it('floors and DCs', () => {
     const d = base();
-    d.datacenters[0].floors[0].racks[0].id = 'R-1F-01-02';
-    expect(defaultRackId(d.datacenters[0], '1F', 1, 2)).toBe('R-1F-01-02-2');
-    expect(firstEmptySlot(base().datacenters[0].floors[0])).toEqual({ row: 1, col: 2 });
-    expect(firstEmptySlot(base().datacenters[1].floors[0])).toBe(null);
+    expect(nextFloorDefaults(d.datacenters[0])).toEqual({ id: '4F', level: 4 });
+    const f = addFloor(d, '가산IDC', { level: '' });
+    expect(f.floorId).toBe('4F');
+    err(() => addFloor(d, '가산IDC', { level: 3 }), /이미 있습니다/);
+    err(() => addFloor(d, '가산IDC', { level: 10 }), /1–9/);
+    expect(check(f.data).fatal).toEqual([]);
+    const n = addDc(d, { name: '의왕IDC', level: '' });
+    expect(n.dcId).toBe('의왕IDC');
+    expect(n.data.datacenters[2]).toMatchObject({ id: '의왕IDC', floors: [{ id: '1F', level: 1, racks: [] }] });
+    err(() => addDc(d, { name: '가산IDC' }), /이미 있습니다/);
+    err(() => deleteFloor(d, '파주IDC', '2F'), /하나 이상/);
+    expect(deleteFloor(f.data, '가산IDC', '4F').datacenters[0].floors).toHaveLength(1);
+    expect(deleteDc(d, '파주IDC').datacenters).toHaveLength(1);
+    err(() => deleteDc(deleteDc(d, '파주IDC'), '가산IDC'), /하나뿐/);
+    expect(renameDc(d, '가산IDC', '가산 IDC').datacenters[0].name).toBe('가산 IDC');
+    expect(countUnder(d.datacenters[0])).toEqual({ floors: 1, racks: 2, servers: 2 });
   });
-  it('renameDc requires a name', () => {
-    expect(renameDc(base(), 'd2', ' 부산 ').datacenters[1].name).toBe('부산');
-    err(() => renameDc(base(), 'd2', ''), /이름/);
-    err(() => renameDc(base(), 'zz', 'x'), /데이터센터 "zz"/);
-  });
-  it('toPlain drops invalid flags only', () => {
-    const d = base();
-    rackA(d).servers[0].invalid = true;
-    const p = toPlain(d);
-    expect(rackA(p).servers[0].invalid).toBeUndefined();
-    expect(rackA(p).servers[0].hostname).toBe('a');
-  });
-});
-
-describe('normalize re-derives invalid', () => {
-  it('a fixed server loses its flag after re-normalizing', () => {
-    const d = base();
-    rackA(d).servers[0].invalid = true;
-    expect(rackA(normalize(d)).servers[0].invalid).toBeUndefined();
-  });
-});
-
-describe('add floor / datacenter', () => {
-  it('nextFloorDefaults: level above the top, `{level}F`, top floor grid', () => {
-    const d = base();
-    expect(nextFloorDefaults(d.datacenters[0])).toEqual({ id: '2F', level: 2, rows: 2, cols: 2 });
-    d.datacenters[0].floors[0].level = 3;
-    d.datacenters[0].floors[0].id = '4F';
-    expect(nextFloorDefaults(d.datacenters[0])).toEqual({ id: '4F-2', level: 4, rows: 2, cols: 2 });
-  });
-  it('addFloor: defaults, explicit level/id, uniqueness and grid limits', () => {
-    const d = base();
-    const a = addFloor(d, 'd1', { rows: '3', cols: '4' });
-    expect(a.floorId).toBe('2F');
-    expect(a.data.datacenters[0].floors[1]).toEqual({ id: '2F', level: 2, rows: 3, cols: 4, racks: [] });
-    expect(validate(a.data)).toMatchObject({ fatal: [], warnings: [] });
-    const b = addFloor(d, 'd1', { level: '-1', rows: 2, cols: 2 });
-    expect(b.floorId).toBe('-1F');
-    expect(addFloor(d, 'd1', { id: 'B1', level: 0, rows: 2, cols: 2 }).floorId).toBe('B1');
-    expect(d.datacenters[0].floors).toHaveLength(1); // input untouched
-    err(() => addFloor(d, 'd1', { id: '1F', rows: 2, cols: 2 }), /층 ID "1F"/);
-    err(() => addFloor(d, 'd1', { level: 1, rows: 2, cols: 2 }), /레벨 1 층이 이미/);
-    err(() => addFloor(d, 'd1', { level: '1.5', rows: 2, cols: 2 }), /정수/);
-    err(() => addFloor(d, 'd1', { rows: 0, cols: 2 }), /Row 수/);
-    err(() => addFloor(d, 'd1', { rows: 2, cols: 61 }), /60 이하/);
-  });
-  it('addDc: new DC with an empty first floor, valid; id default and uniqueness', () => {
-    const d = base();
-    expect(defaultDcId(d)).toBe('dc-3');
-    const { data, dcId } = addDc(d, { name: ' 광주 DC4 ', rows: 5, cols: 8 });
-    expect(dcId).toBe('dc-3');
-    expect(data.datacenters[2]).toEqual({ id: 'dc-3', name: '광주 DC4', floors: [{ id: '1F', level: 1, rows: 5, cols: 8, racks: [] }] });
-    expect(validate(data)).toMatchObject({ fatal: [], warnings: [] });
-    expect(addDc(d, { id: 'gj', name: 'x', floorId: 'G', rows: 1, cols: 1 }).data.datacenters[2].floors[0].id).toBe('G');
-    err(() => addDc(d, { id: 'd1', name: 'x', rows: 1, cols: 1 }), /"d1"이\(가\) 이미/);
-    err(() => addDc(d, { name: '', rows: 1, cols: 1 }), /이름/);
-    err(() => addDc(d, { name: 'x', rows: 1, cols: 'a' }), /Col 수/);
-  });
-});
-
-describe('delete floor / datacenter', () => {
-  it('deleteFloor removes it with its racks; last floor is protected', () => {
-    const two = addFloor(base(), 'd1', { rows: 1, cols: 1 }).data;
-    const out = deleteFloor(two, 'd1', '1F');
-    expect(out.datacenters[0].floors.map((f) => f.id)).toEqual(['2F']);
-    expect(out.datacenters[1].floors.map((f) => f.id)).toEqual(['1F']); // same id in d2 untouched
-    expect(validate(out).fatal).toEqual([]);
-    expect(two.datacenters[0].floors).toHaveLength(2);
-    err(() => deleteFloor(base(), 'd1', '1F'), /하나 이상/);
-    err(() => deleteFloor(two, 'd1', '9F'), /층 "9F"/);
-  });
-  it('deleteDc removes it; the last DC is protected', () => {
-    const out = deleteDc(base(), 'd1');
-    expect(out.datacenters.map((d) => d.id)).toEqual(['d2']);
-    expect(validate(out).fatal).toEqual([]);
-    err(() => deleteDc(out, 'd2'), /하나뿐/);
-    err(() => deleteDc(base(), 'zz'), /데이터센터 "zz"/);
-  });
-  it('countUnder counts a DC or a floor', () => {
-    expect(countUnder(base().datacenters[0])).toEqual({ floors: 1, racks: 1, servers: 2 });
-    expect(countUnder(base().datacenters[0].floors[0])).toEqual({ floors: 1, racks: 1, servers: 2 });
+  it('toPlain = stored tree without derived/view fields', () => {
+    const s = JSON.stringify(toPlain(base()));
+    expect(s).not.toMatch(/"(zones|unit|height_u|span|violation|invalid)"/);
   });
 });

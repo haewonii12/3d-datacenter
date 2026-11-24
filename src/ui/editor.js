@@ -1,6 +1,7 @@
 import { el } from './dom.js';
-import { rackLabel, worldToGrid } from '../domain/layout.js';
-import { STATUS_TEXT } from './serverPanel.js';
+import { rackLabel, rackCellsLabel, floorspaceAt } from '../domain/layout.js';
+import { formatPosition } from '../data/records.js';
+import { emptySlots } from '../domain/slots.js';
 import {
   EditError,
   addDc,
@@ -8,7 +9,6 @@ import {
   countUnder,
   deleteDc,
   deleteFloor,
-  defaultDcId,
   nextFloorDefaults,
   addRack,
   addServer,
@@ -20,10 +20,10 @@ import {
   updateServer,
 } from '../data/edit.js';
 
-/** Lowest free U where a server of `height` fits, or null. */
+/** Lowest free U where a device of `height` fits, or null. */
 function firstFreeUnit(rack, height = 1) {
   const used = new Set();
-  for (const s of rack.servers) for (let u = s.unit; u < s.unit + (s.height_u || 1); u++) used.add(u);
+  for (const s of rack.servers) if (!s.invalid) for (let u = s.unit; u < s.unit + s.height_u; u++) used.add(u);
   for (let u = 1; u + height - 1 <= rack.total_u; u++) {
     let ok = true;
     for (let k = u; k < u + height; k++) if (used.has(k)) ok = false;
@@ -128,32 +128,25 @@ export function createEditor(panel, store, { commit }) {
       form,
       addFloorForm(dc),
       addDcForm(),
-      el('p', { class: 'edit-hint' }, '층을 선택하면 랙을, 랙을 선택하면 서버를 추가할 수 있습니다.'),
+      el('p', { class: 'edit-hint' }, '층을 선택하면 랙을, 랙을 선택하면 장비를 추가할 수 있습니다.'),
       dangerZone('delete-dc', '데이터센터 삭제', () => {
         const c = countUnder(dc);
-        return `데이터센터 "${dc.name}"와 층 ${c.floors}개 · 랙 ${c.racks}개 · 서버 ${c.servers}대를 모두 삭제할까요?`;
+        return `데이터센터 "${dc.name}"와 층 ${c.floors}개 · 랙 ${c.racks}개 · 장비 ${c.servers}대를 모두 삭제할까요?`;
       }, () => deleteDc(store.data, dc.id), store.datacenters.length === 1 ? '데이터센터가 하나뿐이라 삭제할 수 없습니다.' : null),
     ];
   }
 
-  /** Overview: new floor on top of the stack (prefilled from the top floor). */
+  /** Overview: new floor (level = the floorspace's first digit). */
   function addFloorForm(dc) {
     const def = nextFloorDefaults(dc);
     const errBox = el('div', { class: 'edit-error', role: 'alert', hidden: true });
-    const id = input('floor-id', '', { placeholder: def.id });
-    const level = input('level', '', { type: 'number', step: 1, placeholder: String(def.level) });
-    const rows = input('rows', def.rows, { type: 'number', min: 1, max: 60, required: true });
-    const cols = input('cols', def.cols, { type: 'number', min: 1, max: 60, required: true });
-    const g1 = el('div', { class: 'edit-grid2' });
-    g1.append(field('층 ID', id), field('레벨 (아래→위)', level));
-    const g2 = el('div', { class: 'edit-grid2' });
-    g2.append(field('Row 수', rows), field('Col 수', cols));
+    const level = input('level', '', { type: 'number', step: 1, min: 1, max: 9, placeholder: String(def.level) });
     const form = el('form', { class: 'edit-form edit-section', 'data-form': 'add-floor' });
-    form.append(el('h3', {}, '층 추가'), g1, g2, errBox, buttons(el('button', { type: 'submit', class: 'primary' }, '층 추가')));
+    form.append(el('h3', {}, '층 추가'), field('층 (1–9)', level), errBox, buttons(el('button', { type: 'submit', class: 'primary' }, '층 추가')));
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       attempt(() => {
-        const out = addFloor(store.data, dc.id, { id: id.value, level: level.value, rows: rows.value, cols: cols.value });
+        const out = addFloor(store.data, dc.id, { level: level.value });
         commit(out.data);
         flash = `층 추가됨: ${out.floorId}`; // shown by the floor's add-rack form
         store.enterFloor(out.floorId);
@@ -162,31 +155,23 @@ export function createEditor(panel, store, { commit }) {
     return form;
   }
 
-  /** Overview: new DC with its first floor; switches to it. */
+  /** Overview: new DC (build) with its first floor; switches to it. */
   function addDcForm() {
     const errBox = el('div', { class: 'edit-error', role: 'alert', hidden: true });
-    const id = input('dc-id', '', { placeholder: defaultDcId(store.data) });
-    const name = input('dc-name', '', { required: true, placeholder: '예: 광주 DC4' });
-    const floorId = input('first-floor', '', { placeholder: '1F' });
-    const rows = input('dc-rows', 10, { type: 'number', min: 1, max: 60, required: true });
-    const cols = input('dc-cols', 16, { type: 'number', min: 1, max: 60, required: true });
-    const g1 = el('div', { class: 'edit-grid2' });
-    g1.append(field('ID', id), field('첫 층 ID', floorId));
-    const g2 = el('div', { class: 'edit-grid2' });
-    g2.append(field('Row 수', rows), field('Col 수', cols));
+    const name = input('dc-name', '', { required: true, placeholder: '예: 의왕IDC' });
+    const level = input('first-level', '', { type: 'number', min: 1, max: 9, placeholder: '1' });
     const form = el('form', { class: 'edit-form edit-section', 'data-form': 'add-dc' });
     form.append(
       el('h3', {}, '데이터센터 추가'),
-      field('이름', name),
-      g1,
-      g2,
+      field('이름 (build_name)', name),
+      field('첫 층 (1–9)', level),
       errBox,
       buttons(el('button', { type: 'submit', class: 'primary' }, '데이터센터 추가')),
     );
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       attempt(() => {
-        const out = addDc(store.data, { id: id.value, name: name.value, floorId: floorId.value, rows: rows.value, cols: cols.value });
+        const out = addDc(store.data, { name: name.value, level: level.value });
         commit(out.data);
         flash = '데이터센터 추가됨';
         store.selectDc(out.dcId);
@@ -200,67 +185,61 @@ export function createEditor(panel, store, { commit }) {
     const floor = store.getFloor(state.floor);
     const dc = store.getDc(state.dc);
     const slot = prefill(state).slot ?? firstEmptySlot(floor);
-    const { head, errBox, msg } = shell('랙 추가', `${floor.id} · ${floor.rows}×${floor.cols} 슬롯`);
+    const zones = (floor.zones || []).map((z) => z.id).join('·') || '없음';
+    const { head, errBox, msg } = shell('랙 추가', `${floor.id} · 구역 ${zones}`);
     const delFloor = dangerZone('delete-floor', '층 삭제', () => {
       const c = countUnder(floor);
-      return `층 ${floor.id}${c.racks ? `과 랙 ${c.racks}개 · 서버 ${c.servers}대` : ''}를 삭제할까요?`;
+      return `층 ${floor.id}${c.racks ? `과 랙 ${c.racks}개 · 장비 ${c.servers}대` : ''}를 삭제할까요?`;
     }, () => deleteFloor(store.data, dc.id, floor.id), dc.floors.length === 1 ? '마지막 층은 삭제할 수 없습니다. 데이터센터를 삭제하세요.' : null);
-    if (!slot) return [head, msg, el('p', { class: 'edit-hint' }, '빈 슬롯이 없습니다.'), delFloor];
-    const row = input('row', slot.row, { type: 'number', min: 1, max: floor.rows, required: true });
-    const col = input('col', slot.col, { type: 'number', min: 1, max: floor.cols, required: true });
-    const id = input('id', '', { placeholder: defaultRackId(dc, floor.id, slot.row, slot.col) });
-    const syncPlaceholder = () => {
-      const r = Number(row.value);
-      const c = Number(col.value);
-      if (Number.isInteger(r) && Number.isInteger(c)) id.placeholder = defaultRackId(dc, floor.id, r, c);
-    };
-    row.addEventListener('input', syncPlaceholder);
-    col.addEventListener('input', syncPlaceholder);
+    const code = slot?.floorspace ?? `${floor.level}A0101`;
+    const cells = input('floorspaces', code, { required: true, placeholder: `${floor.level}A0101,${floor.level}A0102` });
+    const name = input('rack-name', '', { placeholder: defaultRackId(dc, code) });
+    cells.addEventListener('input', () => {
+      name.placeholder = defaultRackId(dc, cells.value.split(',')[0].trim().toUpperCase());
+    });
     const form = el('form', { class: 'edit-form', 'data-form': 'add-rack' });
-    const grid = el('div', { class: 'edit-grid2' });
-    grid.append(field('Row', row), field('Col', col));
-    form.append(grid, field('랙 ID', id), errBox, msg, buttons(el('button', { type: 'submit', class: 'primary' }, '랙 추가')));
+    form.append(field('floorspace (여러 칸은 쉼표)', cells), field('랙 이름 (rack_name)', name), errBox, msg, buttons(el('button', { type: 'submit', class: 'primary' }, '랙 추가')));
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       attempt(() => {
-        const out = addRack(store.data, dc.id, floor.id, { row: row.value, col: col.value, id: id.value });
+        const out = addRack(store.data, dc.id, floor.id, { floorspaces: cells.value, name: name.value });
         draft = {};
         flash = `랙 추가됨: ${out.rackId}`;
         commit(out.data);
       }, errBox);
     });
-    return [head, form, el('p', { class: 'edit-hint' }, '바닥의 빈 슬롯(점선)을 클릭하면 위치가 채워집니다.'), delFloor];
+    const hint = floor.zones?.length
+      ? '바닥의 빈 상면(점선)을 클릭하면 floorspace가 채워집니다. 새 구역/줄은 코드를 직접 입력하세요.'
+      : '이 층에는 아직 상면이 없습니다. floorspace 코드를 입력하세요 (예: 1A0101).';
+    return [head, form, el('p', { class: 'edit-hint' }, hint), delFloor];
   }
 
-  // ── rack: add server, delete rack ────────────────────────────────────────────────────────────
+  // ── rack: add device, delete rack ────────────────────────────────────────────────────────────
   function rackForm(state) {
     const { rack, floor } = store.getRack(state.rack);
     const dc = store.getDc(state.dc);
-    const { head, errBox, msg } = shell(`랙 ${rackLabel(rack)} 편집`, `${floor.id} · ${rack.id}`);
-    const unitValue = prefill(state).unit ?? firstFreeUnit(rack);
+    const { head, errBox, msg } = shell(`랙 ${rackLabel(rack)} 편집`, `${floor.id} · ${rackCellsLabel(rack)}`);
+    const u = prefill(state).unit ?? firstFreeUnit(rack);
     const form = el('form', { class: 'edit-form', 'data-form': 'add-server' });
-    const hostname = input('hostname', '', { required: true, placeholder: 'web-01' });
-    const ip = input('ip', '', { placeholder: '10.0.0.1' });
-    const unit = input('unit', unitValue ?? '', { type: 'number', min: 1, max: rack.total_u, required: true });
-    const height = input('height_u', 1, { type: 'number', min: 1, max: rack.total_u, required: true });
-    const grid = el('div', { class: 'edit-grid2' });
-    grid.append(field('시작 U', unit), field('높이 (U)', height));
+    const name = input('device_name', '', { required: true, placeholder: 'web-01' });
+    const company = input('company', '', { placeholder: '해원회사' });
+    const pos = input('device_position', u ? formatPosition(u, u) : '', { required: true, placeholder: '1U (39-39)' });
     form.append(
-      el('h3', {}, '서버 추가'),
-      field('호스트명', hostname),
-      field('IP', ip),
-      grid,
+      el('h3', {}, '장비 추가'),
+      field('장비 이름', name),
+      field('회사', company),
+      field('장착 위치 (예: 3U (29-31))', pos),
       errBox,
       msg,
-      buttons(el('button', { type: 'submit', class: 'primary' }, '서버 추가')),
+      buttons(el('button', { type: 'submit', class: 'primary' }, '장비 추가')),
     );
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       attempt(() => {
-        const out = addServer(store.data, dc.id, rack.id, { hostname: hostname.value, ip: ip.value, unit: unit.value, height_u: height.value });
+        const out = addServer(store.data, dc.id, rack.id, { device_name: name.value, company: company.value, device_position: pos.value });
         draft = {};
         commit(out.data);
-        flash = '서버 추가됨'; // shown by the server form that selectServer opens
+        flash = '장비 추가됨'; // shown by the device form that selectServer opens
         store.selectServer(out.serverId);
       }, errBox);
     });
@@ -268,79 +247,36 @@ export function createEditor(panel, store, { commit }) {
     const del = el('button', { type: 'button', class: 'danger', 'data-action': 'delete-rack' }, '랙 삭제');
     del.addEventListener('click', () => {
       const n = rack.servers.length;
-      if (!window.confirm(`랙 ${rackLabel(rack)}${n ? `과 서버 ${n}대` : ''}를 삭제할까요?`)) return;
+      if (!window.confirm(`랙 ${rackLabel(rack)}${n ? `과 장비 ${n}대` : ''}를 삭제할까요?`)) return;
       attempt(() => commit(deleteRack(store.data, dc.id, rack.id)), delErr);
     });
     const danger = el('div', { class: 'edit-danger' });
     danger.append(delErr, del);
-    return [head, form, el('p', { class: 'edit-hint' }, '배치도의 빈 U를 클릭하면 시작 U가 채워집니다.'), danger];
+    return [head, form, el('p', { class: 'edit-hint' }, '배치도의 빈 U를 클릭하면 장착 위치가 채워집니다. 경계 U 하나는 두 장비가 함께 쓸 수 있습니다.'), danger];
   }
 
-  // ── server: fields + services, delete ────────────────────────────────────────────────────────
-  function serviceRow(svc = { name: '', team: '', status: 'ok' }) {
-    const li = el('li', { class: 'edit-service' });
-    const status = el('select', { name: 'status' });
-    for (const [v, label] of Object.entries(STATUS_TEXT)) status.append(el('option', { value: v }, label));
-    status.value = STATUS_TEXT[svc.status] ? svc.status : 'unknown';
-    const remove = el('button', { type: 'button', class: 'icon', title: '서비스 삭제', 'data-action': 'remove-service' }, '×');
-    remove.addEventListener('click', () => li.remove());
-    li.append(input('svc-name', svc.name, { placeholder: '서비스명' }), input('svc-team', svc.team ?? '', { placeholder: '팀' }), status, remove);
-    return li;
-  }
-
+  // ── device: fields, delete ───────────────────────────────────────────────────────────────────
   function serverForm(state) {
     const { server } = store.getServer(state.server);
     const dc = store.getDc(state.dc);
-    const { head, errBox, msg } = shell('서버 편집', server.id);
-    const hostname = input('hostname', server.hostname, { required: true });
-    const ip = input('ip', server.ip ?? '');
-    const unit = input('unit', server.unit, { type: 'number', min: 1, required: true });
-    const height = input('height_u', server.height_u || 1, { type: 'number', min: 1, required: true });
-    const services = el('ul', { class: 'edit-services' });
-    services.append(...server.services.map((s) => serviceRow(s)));
-    const add = el('button', { type: 'button', 'data-action': 'add-service' }, '+ 서비스 추가');
-    add.addEventListener('click', () => {
-      const li = serviceRow();
-      services.append(li);
-      li.querySelector('input').focus();
-    });
-    const grid = el('div', { class: 'edit-grid2' });
-    grid.append(field('시작 U', unit), field('높이 (U)', height));
+    const { head, errBox, msg } = shell('장비 편집', server.id);
+    const name = input('device_name', server.device_name, { required: true });
+    const company = input('company', server.company ?? '');
+    const pos = input('device_position', server.device_position, { required: true });
     const form = el('form', { class: 'edit-form', 'data-form': 'server' });
-    form.append(
-      field('호스트명', hostname),
-      field('IP', ip),
-      grid,
-      el('h3', {}, '서비스'),
-      services,
-      add,
-      errBox,
-      msg,
-      buttons(el('button', { type: 'submit', class: 'primary' }, '저장')),
-    );
+    form.append(field('장비 이름', name), field('회사', company), field('장착 위치', pos), errBox, msg, buttons(el('button', { type: 'submit', class: 'primary' }, '저장')));
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      const svcs = [...services.children].map((li) => ({
-        name: li.querySelector('[name=svc-name]').value,
-        team: li.querySelector('[name=svc-team]').value,
-        status: li.querySelector('[name=status]').value,
-      }));
       attempt(() => {
-        const next = updateServer(store.data, dc.id, server.id, {
-          hostname: hostname.value,
-          ip: ip.value,
-          unit: unit.value,
-          height_u: height.value,
-          services: svcs.filter((s) => s.name.trim() || s.team.trim()), // fully blank rows are ignored
-        });
+        const next = updateServer(store.data, dc.id, server.id, { device_name: name.value, company: company.value, device_position: pos.value });
         flash = '저장됨';
         commit(next);
       }, errBox);
     });
     const delErr = el('div', { class: 'edit-error', role: 'alert', hidden: true });
-    const del = el('button', { type: 'button', class: 'danger', 'data-action': 'delete-server' }, '서버 삭제');
+    const del = el('button', { type: 'button', class: 'danger', 'data-action': 'delete-server' }, '장비 삭제');
     del.addEventListener('click', () => {
-      if (!window.confirm(`서버 ${server.hostname}를 삭제할까요?`)) return;
+      if (!window.confirm(`장비 ${server.device_name || server.device_position}를 삭제할까요?`)) return;
       attempt(() => commit(deleteServer(store.data, dc.id, server.id)), delErr);
     });
     const danger = el('div', { class: 'edit-danger' });
@@ -351,14 +287,14 @@ export function createEditor(panel, store, { commit }) {
   const FORMS = { overview: dcForm, floor: floorForm, rack: rackForm, server: serverForm };
 
   function render(state, force = false) {
-    root.hidden = !editing;
+    const mode = store.modeOf(state);
+    root.hidden = !editing || mode === 'map';
     document.body.classList.toggle('editing', editing);
-    if (!editing) {
+    if (!editing || mode === 'map') {
       key = null;
       root.replaceChildren();
       return;
     }
-    const mode = store.modeOf(state);
     const k = JSON.stringify([store.revision, state, prefill(state)]);
     if (k === key && !force) return;
     key = k;
@@ -388,9 +324,10 @@ export function createEditor(panel, store, { commit }) {
     interceptClick(hit, mode) {
       if (!editing || mode !== 'floor' || hit?.kind !== 'slab' || hit.id !== store.state.floor) return false;
       const floor = store.getFloor(hit.id);
-      const slot = hit.point && worldToGrid(floor, hit.point.x, hit.point.z);
-      if (!slot || floor.racks.some((r) => r.row === slot.row && r.col === slot.col)) return false;
-      draft = { at: targetOf(store.state), slot };
+      const cell = hit.point && floorspaceAt(floor, hit.point.x, hit.point.z);
+      if (!cell) return false;
+      if (!emptySlots(floor).some((x) => x.floorspace === cell.code)) return false; // occupied cell
+      draft = { at: targetOf(store.state), slot: { floorspace: cell.code } };
       render(store.state);
       return true;
     },

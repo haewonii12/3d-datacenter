@@ -1,10 +1,8 @@
 import { el } from './dom.js';
-import { locationLabel } from '../domain/layout.js';
-
-export const STATUS_TEXT = { ok: '정상', warn: '경고', down: '중단', unknown: '알수없음' };
+import { locationLabel, deviceLabel } from '../domain/layout.js';
 
 /**
- * Server details inside #panel, below the elevation (server mode only). textContent only.
+ * Device details inside #panel, below the elevation (server mode only). textContent only.
  * Adds `.with-server` to the panel so the elevation compacts and both stay visible.
  */
 export function createServerPanel(panel, store) {
@@ -14,31 +12,27 @@ export function createServerPanel(panel, store) {
 
   function field(k, label, value) {
     const row = el('div', { class: 'row' });
-    row.append(el('span', { class: 'k' }, label), el('span', { class: 'v', 'data-k': k }, value ?? '—'));
+    row.append(el('span', { class: 'k' }, label), el('span', { class: 'v', 'data-k': k }, value || '—'));
     return row;
   }
 
   function build({ server, rack, floor }, dc) {
-    const list = el('ul', { class: 'services' });
-    for (const svc of server.services) {
-      const status = STATUS_TEXT[svc.status] ? svc.status : 'unknown';
-      const li = el('li', { class: 'service', 'data-status': status });
-      li.append(
-        el('span', { class: 'name', 'data-k': 'name' }, svc.name),
-        el('span', { class: 'team', 'data-k': 'team' }, svc.team ?? '—'),
-        el('span', { class: `badge status-${status}`, 'data-k': 'status' }, STATUS_TEXT[status]),
-      );
-      list.append(li);
+    const parts = [
+      el('h2', { 'data-k': 'device_name' }, deviceLabel(server)),
+      field('company', '회사', server.company),
+      field('build_name', '데이터센터', dc?.name),
+      field('rack_name', '랙', rack.name || rack.id),
+      field('floorspace_name', '상면', rack.floorspaces.join(',')),
+      field('device_position', '장착 위치', server.device_position),
+      field('location', '위치', `${floor.id} · ${locationLabel(floor, rack, server)}`),
+    ];
+    const reasons = [...(server.invalid ? ['장착 위치를 해석할 수 없어 랙에 그리지 않습니다'] : []), ...(server.violation || [])];
+    if (reasons.length) {
+      const list = el('ul', { class: 'violations', 'data-k': 'violations' });
+      for (const r of reasons) list.append(el('li', {}, r));
+      parts.push(el('h3', { class: 'violation-title' }, '⚠ 규칙 위반'), list);
     }
-    root.replaceChildren(
-      el('h2', { 'data-k': 'hostname' }, server.hostname),
-      field('dc', '데이터센터', dc?.name),
-      field('ip', 'IP', server.ip),
-      field('location', '위치', locationLabel(floor, rack, server)),
-      field('height', '높이', `${server.height_u || 1}U`),
-      el('h3', {}, `서비스 (${server.services.length})`),
-      server.services.length ? list : el('div', { class: 'none' }, '서비스 없음'),
-    );
+    root.replaceChildren(...parts);
   }
 
   function render(state) {
@@ -50,7 +44,7 @@ export function createServerPanel(panel, store) {
       root.replaceChildren();
       return;
     }
-    // Server ids may repeat across DCs, so the cache key carries the DC.
+    // Device ids may repeat across DCs, so the cache key carries the DC.
     const key = `${store.revision}\u0000${state.dc}\u0000${state.server}`;
     if (serverId !== key) {
       build(s, store.getDc(state.dc));

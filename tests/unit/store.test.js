@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createStore, bindHash } from '../../src/state/store.js';
 import { parse } from '../../src/state/hash.js';
 
-const mk = (id, n) => Array.from({ length: n }, (_, i) => ({ id: `${id}-s${i}`, hostname: 'h', unit: 1 + i, height_u: 1, services: [] }));
+const mk = (id, n) => Array.from({ length: n }, (_, i) => ({ id: `${id}-s${i}`, device_name: 'h', unit: 1 + i, height_u: 1 }));
 const floors = () => [
   { id: '1F', rows: 1, cols: 2, racks: [{ id: 'RA', row: 1, col: 1, total_u: 42, servers: mk('RA', 2) }] },
   { id: '2F', rows: 1, cols: 2, racks: [{ id: 'RB', row: 1, col: 1, total_u: 42, servers: mk('RB', 2) }] },
@@ -24,14 +24,15 @@ const full = at({ floor: '2F', rack: 'RB', server: 'RB-s1' });
 
 describe('store', () => {
   it('navigate writes hash only; apply mutates', () => {
-    store.navigate({ floor: '2F' });
+    store.navigate({ dc: 'd1', floor: '2F' });
     expect(loc.hash).toBe('#dc=d1&floor=2F');
-    expect(store.state).toEqual({ dc: null, floor: null, rack: null, server: null });
+    expect(store.state).toEqual({ dc: null, floor: null, rack: null, server: null }); // the map, until applied
     store.apply(parse(loc.hash));
     expect(store.state).toEqual(at({ floor: '2F' }));
     expect(hist.replaceState).not.toHaveBeenCalled();
   });
-  it('mode derivation (dc does not change the mode)', () => {
+  it('mode derivation (dc does not change the mode; no dc = map)', () => {
+    expect(store.mode()).toBe('map');
     store.apply({ dc: 'd1' });
     expect(store.mode()).toBe('overview');
     store.apply({ dc: 'd1', floor: '2F' });
@@ -68,25 +69,37 @@ describe('store', () => {
     expect(loc.hash).toBe('#dc=d1');
     expect(hist.replaceState).toHaveBeenCalledTimes(3);
   });
-  it('no dc → first DC, legacy floor/rack/server kept (replaceState then apply)', () => {
+  it('no dc → the map; legacy floor/rack/server without dc → the map (#map)', () => {
     const fn = vi.fn();
     store.subscribe(fn);
-    store.apply(parse('#floor=2F&rack=RB'));
-    expect(store.state).toEqual(at({ floor: '2F', rack: 'RB' }));
-    expect(hist.replaceState).toHaveBeenLastCalledWith(null, '', '#dc=d1&floor=2F&rack=RB');
+    store.apply(parse('#floor=2F&rack=RB'), '#floor=2F&rack=RB');
+    expect(store.state).toEqual({ dc: null, floor: null, rack: null, server: null });
+    expect(store.mode()).toBe('map');
+    expect(hist.replaceState).toHaveBeenLastCalledWith(null, '', '#map');
+    expect(fn).toHaveBeenCalledTimes(1); // the first apply always notifies, even on the initial map state
+    store.apply(parse(''), '');
+    expect(loc.hash).toBe('#map');
     expect(fn).toHaveBeenCalledTimes(1);
-    store.apply(parse(''));
-    expect(store.state).toEqual(at());
-    expect(loc.hash).toBe('#dc=d1');
+    hist.replaceState.mockClear();
+    store.apply(parse('#map'), '#map');
+    expect(hist.replaceState).not.toHaveBeenCalled();
   });
-  it('unknown dc → first DC overview', () => {
+  it('unknown dc → the map', () => {
+    store.apply({ dc: 'd1' });
     store.apply(parse('#dc=nope&floor=3F&rack=RC'));
-    expect(store.state).toEqual(at());
-    expect(hist.replaceState).toHaveBeenLastCalledWith(null, '', '#dc=d1');
+    expect(store.state).toEqual({ dc: null, floor: null, rack: null, server: null });
+    expect(hist.replaceState).toHaveBeenLastCalledWith(null, '', '#map');
+  });
+  it('map: lookups have no implicit DC', () => {
+    expect(store.getFloor('1F')).toBeNull();
+    expect(store.getRack('RA')).toBeNull();
+    expect(store.getDc()).toBeNull();
+    expect(store.getRack('RA', 'd1').rack.id).toBe('RA');
   });
   it('lookups are scoped to the target DC', () => {
     store.apply({ dc: 'd1', rack: 'RC' }); // RC only exists in d2
     expect(store.state).toEqual(at());
+    expect(store.getFloor('3F')).toBeNull();
     store.apply({ dc: 'd2', rack: 'RC' });
     expect(store.state).toEqual({ dc: 'd2', floor: '3F', rack: 'RC', server: null });
     expect(store.getRack('RC').floor.id).toBe('3F');
@@ -94,6 +107,8 @@ describe('store', () => {
     expect(store.getRack('RA', 'd1').rack).not.toBe(store.getRack('RA', 'd2').rack);
     expect(store.getFloor('3F')).toBeTruthy();
     expect(store.getFloor('3F', 'd1')).toBeNull();
+    store.navigate({ dc: null });
+    expect(loc.hash).toBe('#map');
   });
   it('selectDc navigates to that DC overview; navigate keeps the current DC', () => {
     store.apply(full);
@@ -106,19 +121,22 @@ describe('store', () => {
     store.navigate({ dc: 'd1', server: 'RA-s0' });
     expect(loc.hash).toBe('#dc=d1&floor=1F&rack=RA&server=RA-s0');
   });
-  it('up() chain stays in the DC; no-op at overview', () => {
+  it('up() chain: server → rack → floor → DC overview → map; no-op on the map', () => {
     store.apply({ ...full, dc: 'd2' });
     const step = () => { store.up(); store.apply(parse(loc.hash)); return { ...store.state }; };
     expect(step()).toEqual({ dc: 'd2', floor: '2F', rack: 'RB', server: null });
     expect(step()).toEqual({ dc: 'd2', floor: '2F', rack: null, server: null });
     expect(step()).toEqual({ dc: 'd2', floor: null, rack: null, server: null });
+    expect(step()).toEqual({ dc: null, floor: null, rack: null, server: null });
     loc.hash = 'unchanged';
     store.up();
     expect(loc.hash).toBe('unchanged');
   });
-  it('goLevel (root = current DC overview)', () => {
+  it('goLevel (root = the map, dc = current DC overview)', () => {
     store.apply({ ...full, dc: 'd2' });
     store.goLevel('root');
+    expect(loc.hash).toBe('#map');
+    store.goLevel('dc');
     expect(loc.hash).toBe('#dc=d2');
     store.goLevel('floor');
     expect(loc.hash).toBe('#dc=d2&floor=2F');
@@ -137,7 +155,7 @@ describe('store', () => {
     store.apply({ dc: 'd2', floor: '1F' });
     expect(fn).toHaveBeenCalledTimes(2);
     off();
-    store.apply({});
+    store.apply({ dc: 'd1' });
     expect(fn).toHaveBeenCalledTimes(2);
   });
   it('lookup helpers', () => {
@@ -153,7 +171,7 @@ describe('store', () => {
   });
   it('bindHash applies initial hash and on hashchange', () => {
     const listeners = {};
-    const win = { location: { hash: '#floor=1F' }, addEventListener: (n, f) => { listeners[n] = f; } };
+    const win = { location: { hash: '#dc=d1&floor=1F' }, addEventListener: (n, f) => { listeners[n] = f; } };
     bindHash(store, win);
     expect(store.state).toEqual(at({ floor: '1F' }));
     win.location.hash = '#dc=d2&floor=2F&rack=RB';
@@ -177,13 +195,14 @@ describe('store', () => {
     store.setData(next); // same state: still notified (the data behind it changed)
     expect(fn).toHaveBeenCalledTimes(2);
   });
-  it('setData reset → first DC overview; unknown current dc handled', () => {
+  it('setData reset → the map; a vanished current dc → the map', () => {
     store.apply({ dc: 'd2', floor: '3F' });
     store.setData(structuredClone(data), { reset: true });
-    expect(store.state).toEqual(at());
+    expect(store.state).toEqual({ dc: null, floor: null, rack: null, server: null });
+    expect(loc.hash).toBe('#map');
     store.apply({ dc: 'd2', floor: '3F' });
     store.setData({ datacenters: [{ id: 'x', name: 'X', floors: floors() }] });
-    expect(store.state).toEqual({ dc: 'x', floor: null, rack: null, server: null });
+    expect(store.state).toEqual({ dc: null, floor: null, rack: null, server: null });
     expect(store.datacenters.map((d) => d.id)).toEqual(['x']);
   });
 });

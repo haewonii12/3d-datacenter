@@ -1,28 +1,19 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { settled } from './helpers.js';
-import { normalize } from '../../src/data/schema.js';
+import { boot, bootMap, settled, loadSample, FIRST_DC, trackErrors } from './helpers.js';
 import { floorStats, occupancy, colorFor, bandFor } from '../../src/domain/occupancy.js';
+import { slotCount } from '../../src/domain/slots.js';
 
-const data = normalize(JSON.parse(readFileSync(new URL('../../public/data/datacenter.json', import.meta.url), 'utf8'))).datacenters[0];
+const data = loadSample().datacenters.find((d) => d.id === FIRST_DC);
 const floorIds = data.floors.map((f) => f.id);
 const pct = (avg) => `${Math.round(avg * 100)}%`;
-
-async function boot(page, url = '/?debug=1') {
-  await page.goto(url);
-  await expect(page.locator('#app')).toHaveAttribute('data-ready', 'ok');
-  await page.waitForFunction(() => window.__dc && window.__dc.isSettled(), null, { timeout: 5000 });
-}
-
+const cellsUsed = (f) => f.racks.reduce((a, r) => a + r.span, 0);
 
 test.describe('overview & floor', () => {
-  let consoleErrors;
+  let errors;
   test.beforeEach(({ page }) => {
-    consoleErrors = [];
-    page.on('console', (m) => m.type() === 'error' && consoleErrors.push(m.text()));
-    page.on('pageerror', (e) => consoleErrors.push(String(e)));
+    errors = trackErrors(page);
   });
-  test.afterEach(() => expect(consoleErrors).toEqual([]));
+  test.afterEach(() => expect(errors).toEqual([]));
 
   test('AC17: initial overview with 4 floor labels from floorStats', async ({ page }) => {
     await boot(page);
@@ -49,10 +40,10 @@ test.describe('overview & floor', () => {
     }
   });
 
-  test('AC6: empty slot count = rows*cols - racks per floor', async ({ page }) => {
+  test('AC6: empty slot count = zone cells - cells covered by racks per floor', async ({ page }) => {
     await boot(page);
     for (const f of data.floors) {
-      expect(await page.evaluate((id) => window.__dc.emptySlotCount(id), f.id)).toBe(f.rows * f.cols - f.racks.length);
+      expect(await page.evaluate((id) => window.__dc.emptySlotCount(id), f.id)).toBe(slotCount(f) - cellsUsed(f));
     }
   });
 
@@ -77,7 +68,7 @@ test.describe('overview & floor', () => {
     );
     expect(samples.some((o) => o > 0 && o < 1), `samples: ${samples.join(',')}`).toBe(true);
     await settled(page);
-    expect(await page.evaluate(() => window.__dc.state())).toEqual({ dc: 'seoul-1', floor: '2F', rack: null, server: null });
+    expect(await page.evaluate(() => window.__dc.state())).toEqual({ dc: FIRST_DC, floor: '2F', rack: null, server: null });
     expect(await page.evaluate(() => window.__dc.mode())).toBe('floor');
     for (const id of floorIds.filter((i) => i !== '2F')) {
       expect(await page.evaluate((i) => window.__dc.floorOpacity(i), id)).toBe(0);
@@ -97,14 +88,15 @@ test.describe('overview & floor', () => {
     await expect(sum.locator('[data-k=racks]')).toHaveText(String(s.racks));
     await expect(sum.locator('[data-k=slots]')).toHaveText(String(s.slots));
     await expect(sum.locator('[data-k=avg]')).toHaveText(pct(s.avg));
+    await expect(sum.locator('[data-k=zones]')).toHaveText(f2.zones.map((z) => z.id).join(' · '));
     for (const b of ['green', 'yellow', 'red']) await expect(sum.locator(`[data-k=${b}]`)).toHaveText(String(s.bands[b]));
     await expect(page.locator('#breadcrumb')).toContainText('2F');
   });
 
   test('floor → overview restores all floors; summary hidden', async ({ page }) => {
-    await boot(page, '/?debug=1#floor=3F');
+    await boot(page, '#dc=%EA%B0%80%EC%82%B0IDC&floor=3F');
     expect(await page.evaluate(() => window.__dc.floorOpacity('1F'))).toBe(0);
-    await page.evaluate(() => window.__dc.navigate({}));
+    await page.evaluate(() => window.__dc.navigate({ floor: null }));
     await settled(page);
     expect(await page.evaluate(() => window.__dc.mode())).toBe('overview');
     for (const id of floorIds) expect(await page.evaluate((i) => window.__dc.floorOpacity(i), id)).toBe(1);
@@ -112,27 +104,32 @@ test.describe('overview & floor', () => {
     await expect(page.locator('.floor-label')).toHaveCount(4);
     for (const id of floorIds) await expect(page.locator(`.floor-label[data-floor="${id}"]`)).toBeVisible();
   });
+
+  test('map entry: no hash shows the map and no floor labels; overview ESC returns to it', async ({ page }) => {
+    await bootMap(page);
+    expect(await page.evaluate(() => window.__dc.mode())).toBe('map');
+    expect(await page.evaluate(() => location.hash)).toBe('#map');
+    await expect(page.locator('#floor-summary')).toBeHidden();
+    await boot(page);
+    await page.keyboard.press('Escape');
+    await expect.poll(() => page.evaluate(() => window.__dc.mode())).toBe('map');
+    await expect(page.locator('#map-view')).toBeVisible();
+  });
 });
 
 test.describe('AC2: load errors and warnings', () => {
-  const fixture = (mutate) => {
-    const json = {
-      version: 1,
-      floors: [
-        {
-          id: '1F',
-          level: 1,
-          rows: 2,
-          cols: 2,
-          racks: [{ id: 'R1', row: 1, col: 1, servers: [{ id: 's1', hostname: 'h1', unit: 1, height_u: 2 }] }],
-        },
-      ],
-    };
-    mutate(json);
-    return JSON.stringify(json);
-  };
+  const rec = (rack, pos, name, cells = '1A0101', build = FIRST_DC) => ({
+    build_name: build,
+    floorspace_name: cells,
+    company: '테스트',
+    rack_name: rack,
+    device_position: pos,
+    device_name: name,
+  });
   const serve = (page, body) =>
-    page.route('**/data/datacenter.json', (route) => route.fulfill({ status: 200, contentType: 'application/json', body }));
+    page.route('**/data/datacenter.json', (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: typeof body === 'string' ? body : JSON.stringify(body) }),
+    );
 
   test('bad JSON → #error mentions JSON', async ({ page }) => {
     await serve(page, '{bad json');
@@ -143,27 +140,38 @@ test.describe('AC2: load errors and warnings', () => {
     await expect(page.locator('canvas')).toHaveCount(0);
   });
 
-  test('missing rows → #error contains floors[0].rows', async ({ page }) => {
-    await serve(page, fixture((j) => delete j.floors[0].rows));
+  test('empty record list → #error', async ({ page }) => {
+    await serve(page, []);
     await page.goto('/?debug=1');
     await expect(page.locator('#app')).toHaveAttribute('data-ready', 'error');
-    await expect(page.locator('#error')).toContainText('floors[0].rows');
+    await expect(page.locator('#error')).toContainText('레코드가 없습니다');
   });
 
-  test('AC13/AC2: bad service status → warning + grey status-unknown badge', async ({ page }) => {
-    await serve(page, fixture((j) => (j.floors[0].racks[0].servers[0].services = [{ name: 'x-api', team: 't', status: 'weird' }])));
-    await page.goto('/?debug=1#server=s1');
-    await expect(page.locator('#app')).toHaveAttribute('data-ready', 'ok');
-    await expect(page.locator('#warnings')).toBeVisible();
-    const badge = page.locator('#server-detail .service .badge');
-    await expect(badge).toHaveClass(/\bstatus-unknown\b/);
-    await expect(badge).toHaveText('알수없음');
-  });
-
-  test('overlap → no #error, warnings badge ≥ 1 with list', async ({ page }) => {
-    await serve(page, fixture((j) => j.floors[0].racks[0].servers.push({ id: 's2', hostname: 'h2', unit: 2 })));
+  test('records without a usable rack_name → #error (no valid records)', async ({ page }) => {
+    await serve(page, [rec('', '2U (1-2)', 'x')]);
     await page.goto('/?debug=1');
+    await expect(page.locator('#app')).toHaveAttribute('data-ready', 'error');
+    await expect(page.locator('#error')).toContainText('유효한 레코드가 없습니다');
+  });
+
+  test('AC2: unparsable device_position → warning, info line, and the device panel explains why it is not drawn', async ({ page }) => {
+    await serve(page, [rec('RK1', '2U (1-2)', 'ok-01'), rec('RK1', 'wrong', 'bad-01')]);
+    await page.goto(`/?debug=1#dc=${encodeURIComponent(FIRST_DC)}&server=${encodeURIComponent('RK1:invalid:0')}`);
     await expect(page.locator('#app')).toHaveAttribute('data-ready', 'ok');
+    await settled(page);
+    await expect(page.locator('#warnings')).toBeVisible();
+    await expect(page.locator('#info')).toContainText('장착 위치 오류 장비 1대');
+    await expect(page.locator('#elevation .elev-server')).toHaveCount(1); // only ok-01 is drawn
+    await expect(page.locator('#elevation .elev-bad li')).toHaveCount(1);
+    await expect(page.locator('#server-detail [data-k=device_name]')).toHaveText('bad-01');
+    await expect(page.locator('#server-detail [data-k=violations]')).toContainText('해석할 수 없어');
+  });
+
+  test('overlap → no #error, warnings badge ≥ 1 with a grouped list, devices flagged', async ({ page }) => {
+    await serve(page, [rec('RK1', '3U (1-3)', 'h1'), rec('RK1', '2U (2-3)', 'h2')]);
+    await page.goto(`/?debug=1#dc=${encodeURIComponent(FIRST_DC)}&rack=RK1`);
+    await expect(page.locator('#app')).toHaveAttribute('data-ready', 'ok');
+    await settled(page);
     await expect(page.locator('#error')).toBeHidden();
     const badge = page.locator('#warnings');
     await expect(badge).toBeVisible();
@@ -172,7 +180,9 @@ test.describe('AC2: load errors and warnings', () => {
     await expect(page.locator('#warnings-list')).toBeHidden();
     await badge.click();
     await expect(page.locator('#warnings-list')).toBeVisible();
-    await expect(page.locator('#warnings-list')).toContainText('floors[0].racks[0].servers[1].unit');
-    await expect(page.locator('#info')).toContainText('1');
+    await expect(page.locator('#warnings-list [data-kind=mount-overlap]').first()).toBeVisible();
+    await expect(page.locator('#warnings-list')).toContainText('h1 / h2');
+    await expect(page.locator('#elevation .elev-server.invalid')).toHaveCount(2);
+    expect(await page.evaluate(() => window.__dc.violationRackIds())).toEqual(['RK1']);
   });
 });

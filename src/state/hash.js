@@ -1,7 +1,8 @@
 const KEYS = ['dc', 'floor', 'rack', 'server'];
 
 /**
- * @param {string} hashString e.g. '#dc=seoul-1&floor=2F&rack=R1'
+ * `#map` (and '') is the map entry screen: every key null.
+ * @param {string} hashString e.g. '#dc=가산IDC&floor=2F&rack=R1'
  * @returns {{dc:string|null, floor:string|null, rack:string|null, server:string|null}}
  */
 export function parse(hashString) {
@@ -22,16 +23,20 @@ export function parse(hashString) {
   return out;
 }
 
+/** Canonical hash of the map screen (no datacenter selected). */
+export const MAP_HASH = '#map';
+
 /**
- * All-null state serializes to ''.
+ * A state without `dc` (the map) serializes to MAP_HASH.
  * @param {{dc?:string|null, floor?:string|null, rack?:string|null, server?:string|null}} state
  * @returns {string}
  */
 export function serialize(state) {
+  if (state.dc == null || state.dc === '') return MAP_HASH;
   const parts = [];
   for (const k of KEYS) {
     const v = state[k];
     if (v != null && v !== '') parts.push(`${k}=${encodeURIComponent(v)}`);
   }
-  return parts.length ? `#${parts.join('&')}` : '';
+  return `#${parts.join('&')}`;
 }

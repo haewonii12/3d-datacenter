@@ -1,21 +1,25 @@
 import * as THREE from 'three';
-import { RACK, UNIT_H, unitToY, frontNormal } from '../domain/layout.js';
+import { RACK, UNIT_H, unitToY, mountY, frontNormal, deviceLabel } from '../domain/layout.js';
 import { occupancy, colorFor } from '../domain/occupancy.js';
+import { sharedUnits } from '../domain/mount.js';
+import { getTheme } from '../ui/theme.js';
+import { laneOf } from '../ui/elevation.js';
+import { RACK_PALETTE, devicePanelTexture } from './rackTextures.js';
 import { ease } from './view.js';
 
 const FRAME = 0.03; // post / plate thickness
-const SERVER_W = RACK.w - 0.08; // inside the mounting rails
+const RAIL_INSET = 0.08; // devices sit inside the mounting rails
 const SERVER_D = RACK.d - 0.1;
-const INSET = 0.004; // vertical gap between stacked servers
-const SERVER_COLOR = 0x5b6b82;
+const INSET = 0.004; // vertical gap between stacked devices
+const VIOLATION = 0xf85149;
 const SLIDE = 0.25; // selected server slides out along the front normal (local +z)
 const SLIDE_MS = 200;
 const HIGHLIGHT = 0x1f6feb;
 
-/** Hostname plate for servers >= 2U (front face, local +z). */
-function hostnamePlate(text, heightU) {
-  const h = heightU * UNIT_H * 0.62;
-  const w = SERVER_W * 0.86;
+/** Name plate for devices taller than 1.5U (front face, local +z). */
+function namePlate(text, height, serverW) {
+  const h = height * 0.62;
+  const w = serverW * 0.86;
   const canvas = document.createElement('canvas');
   canvas.width = 512;
   canvas.height = Math.max(32, Math.round((512 * h) / w));
@@ -33,32 +37,36 @@ function hostnamePlate(text, heightU) {
   return plate;
 }
 
-/** Cabinet: posts, plates, back + side panels, edges, occupancy accent strip. Local +z = front, y=0 = rack bottom. */
-function buildCabinet(rack) {
+/**
+ * Cabinet: posts, plates, back + side panels, edges, occupancy accent strip. Local +z = front, y=0 = rack bottom.
+ * `W` is the rack's width (a multi-cell rack is one wide cabinet).
+ */
+function buildCabinet(rack, W, theme) {
   const cab = new THREE.Group();
-  const frameMat = new THREE.MeshStandardMaterial({ color: 0x3a414b, roughness: 0.5, metalness: 0.6 });
-  const panelMat = new THREE.MeshStandardMaterial({ color: 0x161b22, roughness: 0.8, metalness: 0.2 });
+  const frameMat = new THREE.MeshStandardMaterial({ color: RACK_PALETTE.frame, roughness: 0.5, metalness: 0.5 });
+  const panelMat = new THREE.MeshStandardMaterial({ color: RACK_PALETTE.side, roughness: 0.8, metalness: 0.2 });
+  const SERVER_W = W - RAIL_INSET;
   const box = (w, h, d, mat, x, y, z) => {
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
     m.position.set(x, y, z);
     cab.add(m);
   };
-  const hw = RACK.w / 2 - FRAME / 2;
+  const hw = W / 2 - FRAME / 2;
   const hd = RACK.d / 2 - FRAME / 2;
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) box(FRAME, RACK.h, FRAME, frameMat, sx * hw, RACK.h / 2, sz * hd);
-  box(RACK.w, FRAME, RACK.d, frameMat, 0, -FRAME / 2, 0);
-  box(RACK.w, FRAME, RACK.d, frameMat, 0, RACK.h + FRAME / 2, 0);
+  box(W, FRAME, RACK.d, frameMat, 0, -FRAME / 2, 0);
+  box(W, FRAME, RACK.d, frameMat, 0, RACK.h + FRAME / 2, 0);
   // mounting rails just behind the front face
   for (const sx of [-1, 1]) box(0.025, RACK.h, 0.02, frameMat, sx * (SERVER_W / 2 + 0.0125), RACK.h / 2, SERVER_D / 2 - 0.01);
-  box(RACK.w - 2 * FRAME, RACK.h, 0.02, panelMat, 0, RACK.h / 2, -RACK.d / 2 + 0.02); // back panel
-  for (const sx of [-1, 1]) box(0.01, RACK.h, RACK.d - 2 * FRAME, panelMat, sx * (RACK.w / 2 - 0.005), RACK.h / 2, 0);
+  box(W - 2 * FRAME, RACK.h, 0.02, panelMat, 0, RACK.h / 2, -RACK.d / 2 + 0.02); // back panel
+  for (const sx of [-1, 1]) box(0.01, RACK.h, RACK.d - 2 * FRAME, panelMat, sx * (W / 2 - 0.005), RACK.h / 2, 0);
   // occupancy accent strip across the top front
   const accent = new THREE.MeshBasicMaterial({ color: new THREE.Color(colorFor(occupancy(rack))) });
-  box(RACK.w, 0.025, 0.012, accent, 0, RACK.h + FRAME + 0.0125, RACK.d / 2 - 0.006);
+  box(W, 0.025, 0.012, accent, 0, RACK.h + FRAME + 0.0125, RACK.d / 2 - 0.006);
 
   const edges = new THREE.LineSegments(
-    new THREE.EdgesGeometry(new THREE.BoxGeometry(RACK.w, RACK.h + 2 * FRAME, RACK.d)),
-    new THREE.LineBasicMaterial({ color: 0x8b949e }),
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(W, RACK.h + 2 * FRAME, RACK.d)),
+    new THREE.LineBasicMaterial({ color: rack.violation ? VIOLATION : theme.edge }),
   );
   edges.position.y = RACK.h / 2;
   cab.add(edges);
@@ -106,35 +114,53 @@ export function createRackDetail({ scene, racks }) {
     const { rack } = e;
     const center = racks.rackCenter(rackId);
     const n = frontNormal(rack.row);
+    const theme = getTheme();
+    const W = racks.footprint(rackId)?.w ?? RACK.w;
+    const SERVER_W = W - RAIL_INSET;
 
     const group = new THREE.Group();
     group.name = `rackDetail:${rackId}`;
     group.position.set(center.x, center.y - RACK.h / 2, center.z);
     group.rotation.y = n.z > 0 ? 0 : Math.PI; // local +z = front normal
-    group.add(buildCabinet(rack));
+    group.add(buildCabinet(rack, W, theme));
 
     // Invisible pick proxy (Raycaster ignores `visible`): the selected rack's volume.
-    const proxy = new THREE.Mesh(new THREE.BoxGeometry(RACK.w, RACK.h, RACK.d), new THREE.MeshBasicMaterial());
+    const proxy = new THREE.Mesh(new THREE.BoxGeometry(W, RACK.h, RACK.d), new THREE.MeshBasicMaterial());
     proxy.visible = false;
     proxy.position.y = RACK.h / 2;
     proxy.userData = { kind: 'selectedRack', id: rackId };
     group.add(proxy);
 
     const servers = new Map();
-    for (const s of rack.servers) {
-      const h = s.height_u || 1;
-      const mat = new THREE.MeshStandardMaterial({ color: SERVER_COLOR, roughness: 0.55, metalness: 0.35 });
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(SERVER_W, h * UNIT_H - INSET, SERVER_D), mat);
-      mesh.position.set(0, unitToY(s.unit, h), 0);
+    const mounted = rack.servers.filter((s) => !s.invalid); // unparsable positions: listed in the elevation only
+    const shares = sharedUnits(mounted.map((s) => ({ id: s.id, s: s.unit, e: s.unit + s.height_u - 1 })));
+    // Devices overlapping in violation of the mount rules are drawn side by side (same lanes as the elevation).
+    const lanes = laneOf(mounted, shares);
+    const laneCount = Math.max(0, ...lanes.values()) + 1;
+    const laneW = SERVER_W / laneCount;
+    for (const s of mounted) {
+      const h = s.height_u;
+      const { y, h: hy } = mountY(s, shares.get(s.id));
+      // Front face: the same bezel + LED panel as the floor view, one texture row per U.
+      const map = devicePanelTexture();
+      map.wrapT = THREE.RepeatWrapping;
+      map.repeat.set(1, Math.max(1, Math.round(hy / UNIT_H)));
+      const tint = s.violation ? 0xff8a8a : 0xffffff;
+      const front = new THREE.MeshStandardMaterial({ map, color: tint, roughness: 0.4, metalness: 0.5, emissive: 0xffffff, emissiveMap: map, emissiveIntensity: 0.35 });
+      const body = new THREE.MeshStandardMaterial({ color: s.violation ? 0x8a3a3a : RACK_PALETTE.panel, roughness: 0.55, metalness: 0.35 });
+      const mat = [body, body, body, body, front, body];
+      const lit = [body, front]; // materials that take the selection highlight
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(laneW - (laneCount > 1 ? 0.01 : 0), hy - INSET, SERVER_D), mat);
+      mesh.position.set(-SERVER_W / 2 + laneW * ((lanes.get(s.id) ?? 0) + 0.5), y, 0);
       mesh.name = `server:${s.id}`;
-      mesh.userData = { kind: 'server', id: s.id, baseZ: 0, heightU: h };
+      mesh.userData = { kind: 'server', id: s.id, baseZ: 0, heightU: h, lit };
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(mesh.geometry),
-        new THREE.LineBasicMaterial({ color: s.invalid ? 0xf85149 : 0x0d1117 }),
+        new THREE.LineBasicMaterial({ color: s.violation ? VIOLATION : 0x0d1117 }),
       );
-      if (s.invalid) edges.scale.setScalar(1.01);
+      if (s.violation) edges.scale.setScalar(1.01);
       mesh.add(edges);
-      if (h >= 2) mesh.add(hostnamePlate(s.hostname, h));
+      if (hy >= 1.5 * UNIT_H) mesh.add(namePlate(deviceLabel(s), hy, laneW));
       group.add(mesh);
       servers.set(s.id, mesh);
     }
@@ -144,7 +170,7 @@ export function createRackDetail({ scene, racks }) {
     group.traverse((o) => {
       if (!o.material) return;
       o.renderOrder = 1;
-      o.material.transparent = true;
+      for (const mt of Array.isArray(o.material) ? o.material : [o.material]) mt.transparent = true;
     });
     racks.hideInstance(rackId);
     scene.add(group);
@@ -162,8 +188,11 @@ export function createRackDetail({ scene, racks }) {
     if (!cur) return;
     for (const [id, m] of cur.servers) {
       const on = id === serverId;
-      m.material.emissive.setHex(on ? HIGHLIGHT : 0x000000);
-      m.material.emissiveIntensity = on ? 0.7 : 1;
+      const [body, front] = m.userData.lit;
+      body.emissive.setHex(on ? HIGHLIGHT : 0x000000);
+      body.emissiveIntensity = on ? 0.7 : 1;
+      front.emissive.setHex(on ? HIGHLIGHT : 0xffffff);
+      front.emissiveIntensity = on ? 0.9 : 0.35;
       const to = on ? SLIDE : 0;
       const from = m.position.z - m.userData.baseZ;
       slides.delete(m);
@@ -210,7 +239,7 @@ export function createRackDetail({ scene, racks }) {
       return cur.group.localToWorld(out.set(0, unitToY(unit, 1), SERVER_D / 2));
     },
     /** Emissive hex of a server's material (0 = no highlight); null if not built. */
-    serverEmissive: (id) => cur?.servers.get(id)?.material.emissive.getHex() ?? null,
+    serverEmissive: (id) => cur?.servers.get(id)?.userData.lit[0].emissive.getHex() ?? null,
     describe() {
       return [...(cur?.servers ?? [])].map(([id, m]) => {
         m.getWorldPosition(tmp);
@@ -218,7 +247,7 @@ export function createRackDetail({ scene, racks }) {
         cur.group.localToWorld(base.set(m.position.x, m.position.y, m.userData.baseZ));
         const { n } = cur;
         const off = (tmp.x - base.x) * n.x + (tmp.y - base.y) * n.y + (tmp.z - base.z) * n.z;
-        return { id, worldPos: { x: tmp.x, y: tmp.y, z: tmp.z }, offsetAlongNormal: Math.abs(off) < 1e-9 ? 0 : off };
+        return { id, worldPos: { x: tmp.x, y: tmp.y, z: tmp.z }, offsetAlongNormal: Math.abs(off) < 1e-9 ? 0 : off, width: m.geometry.parameters.width };
       });
     },
   };

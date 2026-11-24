@@ -7,16 +7,19 @@ export const RACK_MODE_OPACITY = 0.15;
 /** Rack-mode camera: p = rackCenter + n·DIST + up·LIFT, t = rackCenter. */
 export const RACK_CAM = { dist: 3.5, lift: 0.3 };
 export const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2);
-const modeOf = (s) => (s.server ? 'server' : s.rack ? 'rack' : s.floor ? 'floor' : 'overview');
+const modeOf = (s) => (s.dc == null ? 'map' : s.server ? 'server' : s.rack ? 'rack' : s.floor ? 'floor' : 'overview');
 
 /**
  * The single reconciler for 3D visibility / opacity / labels / camera, and the only place that builds
  * or disposes a DC's floors/racks. Each mode is an absolute target; `prev` only matters for where
  * transitions start. A DC change rebuilds the scene and applies the target without animation.
- * @param {{scene:any, floors: Map<string, any>, racks: any, controls: any, onTick: Function, detail:any, getDc:(id:string)=>any}} deps
- *   floors / racks are stable containers, refilled in place on a DC switch.
+ * The map screen (state.dc == null) leaves the scene untouched (main hides the viewport): no DC is
+ * built or disposed for it, so returning to the same DC needs no rebuild.
+ * @param {{scene:any, floors: Map<string, any>, racks: any, controls: any, onTick: Function, detail:any, getDc:(id:string)=>any,
+ *   getRevision?:()=>any, setShadows?:(on:boolean)=>void}} deps
+ *   floors / racks are stable containers, refilled in place on a DC switch. getRevision changes on data edits and theme switches.
  */
-export function createView({ scene, floors, racks, controls, onTick, detail, getDc, getRevision = () => 0 }) {
+export function createView({ scene, floors, racks, controls, onTick, detail, getDc, getRevision = () => 0, setShadows = () => {} }) {
   /** floorId -> current opacity factor (0..1) */
   const opacity = new Map();
   /** floorId -> rack-material dim factor (1, or RACK_MODE_OPACITY in rack/server mode) */
@@ -69,13 +72,14 @@ export function createView({ scene, floors, racks, controls, onTick, detail, get
     opacity.set(id, o);
     f.slab.material.opacity = o * SLAB_OPACITY;
     f.emptyLines.material.opacity = o;
-    racks.byFloor.get(id).material.opacity = o * (dims.get(id) ?? 1);
+    for (const { material, base } of f.fades) material.opacity = o * base;
+    racks.byFloor.get(id).setOpacity(o * (dims.get(id) ?? 1));
     f.labelEl.style.opacity = String(o);
   }
 
   function setDim(id, d) {
     dims.set(id, d);
-    racks.byFloor.get(id).material.opacity = (opacity.get(id) ?? 1) * d;
+    racks.byFloor.get(id).setOpacity((opacity.get(id) ?? 1) * d);
   }
 
   function dimTo(id, to, instant) {
@@ -138,7 +142,12 @@ export function createView({ scene, floors, racks, controls, onTick, detail, get
    * @param {{dc,floor,rack,server}|null} prev null on first apply (no animation)
    * @param {{dc,floor,rack,server}} next
    */
+  let shown = false; // a DC has been applied at least once
   function applyView(prev, next) {
+    if (next.dc == null) return; // map screen: keep whatever is built
+    const fromMap = prev == null || prev.dc == null;
+    if (fromMap && shown && next.dc === builtDc) prev = null; // viewport was hidden: no fly-in (also after a theme switch on the map)
+    shown = true;
     const switched = next.dc !== builtDc;
     const rebuilt = switched || getRevision() !== builtRev;
     if (rebuilt) loadDc(next.dc);
@@ -149,13 +158,14 @@ export function createView({ scene, floors, racks, controls, onTick, detail, get
     const camAnimate = prev != null && !switched; // after an edit that moved the state (e.g. rack deleted), still fly
     const mode = modeOf(next);
     const detailMode = mode === 'rack' || mode === 'server';
+    setShadows(mode !== 'overview'); // shadows only on a single floor (perf)
 
     if (mode === 'overview') {
       for (const [id, f] of floors) {
         f.label.visible = true;
         fadeTo(id, 1, instant);
         dimTo(id, 1, instant);
-        racks.byFloor.get(id).material.depthWrite = true;
+        racks.byFloor.get(id).setDepthWrite(true);
       }
       moveCamera(overviewPreset([...floors.values()].map((f) => f.floor)), camAnimate);
     } else {
@@ -166,14 +176,14 @@ export function createView({ scene, floors, racks, controls, onTick, detail, get
         f.label.visible = true; // fades with its floor, hidden once the group is hidden
         fadeTo(id, 0, instant);
         dimTo(id, 1, instant);
-        racks.byFloor.get(id).material.depthWrite = true;
+        racks.byFloor.get(id).setDepthWrite(true);
       }
       fades.delete(next.floor);
       setOpacity(next.floor, 1);
       own.group.visible = true;
       own.label.visible = false;
       // Faded racks stay pickable; depthWrite=false so they never occlude the opaque pull-out.
-      racks.byFloor.get(next.floor).material.depthWrite = !detailMode;
+      racks.byFloor.get(next.floor).setDepthWrite(!detailMode);
       dimTo(next.floor, detailMode ? RACK_MODE_OPACITY : 1, instant);
       if (mode === 'floor') moveCamera(floorPreset(own.floor, own.index), camAnimate);
     }

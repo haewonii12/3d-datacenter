@@ -1,4 +1,5 @@
-// Deterministic sample data generator. Usage: node scripts/gen-sample.mjs
+// Deterministic sample data generator (field-record format, one record per device).
+// Usage: node scripts/gen-sample.mjs  → public/data/datacenter.json
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,109 +13,92 @@ export function mulberry32(a) {
   };
 }
 
-const PREFIXES = ['web', 'db', 'cache', 'api', 'batch', 'queue', 'search', 'auth'];
-const SERVICES = [
-  'payment-api', 'order-api', 'user-api', 'auth-service', 'search-indexer', 'search-api',
-  'cart-service', 'inventory-sync', 'notification-hub', 'email-sender', 'sms-gateway',
-  'image-resizer', 'cdn-origin', 'redis-cache', 'postgres-primary', 'postgres-replica',
-  'kafka-broker', 'log-collector', 'metrics-agent', 'batch-scheduler', 'report-builder',
-  'recommendation-engine', 'session-store', 'api-gateway', 'config-server',
-];
-const TEAMS = ['결제팀', '검색팀', '플랫폼팀', '주문팀', '회원팀', '인프라팀', '데이터팀', '보안팀'];
+const PREFIXES = ['web', 'db', 'cache', 'api', 'batch', 'queue', 'search', 'auth', 'nas', 'sw'];
+const COMPANIES = ['해원회사', '한빛솔루션', '누리텍', '다온시스템', '세움IT', '가람네트웍스', '미래데이터'];
+const pad = (n, w) => String(n).padStart(w, '0');
 
-/** id, name, floor count, grid, base slot fill, hostname/IP code. Floor/rack/server ids restart per DC; hostnames carry the code. */
+/** build name, floors, zones per floor, rows × seq cells per zone, cell fill, rack-name / device code. */
 export const DCS = [
-  { id: 'seoul-1', name: '서울 DC1', floors: 4, rows: 12, cols: 20, fill: 0.78, code: 'sel', ip: 10 },
-  { id: 'busan-1', name: '부산 DC2', floors: 3, rows: 10, cols: 16, fill: 0.62, code: 'pus', ip: 20 },
-  { id: 'daejeon-1', name: '대전 DC3', floors: 2, rows: 14, cols: 24, fill: 0.58, code: 'dj', ip: 30 },
+  { name: '가산IDC', floors: 4, zones: ['A', 'B', 'C'], rows: 6, cols: 14, fill: 0.72, code: 'gs', rack: 10 },
+  { name: '영등포IDC', floors: 3, zones: ['A', 'B'], rows: 7, cols: 16, fill: 0.68, code: 'yd', rack: 20 },
+  { name: '파주IDC', floors: 2, zones: ['A', 'B', 'C'], rows: 8, cols: 18, fill: 0.62, code: 'pj', rack: 30 },
 ];
 
-/** One DC from its own PRNG stream (seoul-1 keeps the v1 sample's layout for the same seed). */
+/** Records of one build from its own PRNG stream. Mount rules hold by construction (0 violations). */
 function generateDc(spec, rnd) {
+  const out = [];
   const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
-  const pad = (n, w) => String(n).padStart(w, '0');
-  let serverSeq = 0;
-  const floors = [];
-  for (let level = 1; level <= spec.floors; level++) {
-    const id = `${level}F`;
-    const { rows, cols } = spec;
-    const slotFill = spec.fill + rnd() * 0.12;
-    const ipCounter = {};
-    const racks = [];
-    for (let row = 1; row <= rows; row++) {
-      for (let col = 1; col <= cols; col++) {
-        if (rnd() > slotFill) continue;
-        const rack = { id: `R-${id}-${pad(row, 2)}-${pad(col, 2)}`, row, col, total_u: 42, servers: [] };
-        racks.push(rack);
-        if (rnd() < 0.012) continue; // a few completely empty racks
-        const target = Math.min(42, Math.round(42 * (0.1 + 0.9 * Math.pow(rnd(), 5))));
-        let unit = 1;
-        while (unit <= 42) {
-          const r = rnd();
-          let h = r < 0.6 ? 1 : r < 0.9 ? 2 : 4;
-          const omit = rnd() < 0.055;
-          if (omit) h = 1;
-          if (unit + h - 1 > 42 || unit - 1 >= target) break;
-          serverSeq++;
-          const prefix = pick(PREFIXES);
-          ipCounter[row] = (ipCounter[row] || 0) + 1;
-          const server = {
-            id: `srv-${pad(serverSeq, 5)}`,
-            hostname: `${prefix}-${spec.code}-${pad(serverSeq, 4)}`,
-            ip: `10.${spec.ip + level}.${row}.${((ipCounter[row] - 1) % 254) + 1}`,
-            unit,
-          };
-          if (!omit) server.height_u = h;
-          const n = 1 + Math.floor(rnd() * 5);
-          const used = new Set();
-          server.services = [];
-          while (server.services.length < n) {
-            const si = Math.floor(rnd() * SERVICES.length);
-            if (used.has(si)) continue;
-            used.add(si);
-            const s = rnd();
-            server.services.push({
-              name: SERVICES[si],
-              team: TEAMS[si % TEAMS.length],
-              status: s < 0.85 ? 'ok' : s < 0.95 ? 'warn' : 'down',
-            });
+  let rackSeq = 0;
+  let devSeq = 0;
+  for (let level = 1; level <= spec.floors; level++)
+    for (const zone of spec.zones)
+      for (let row = 1; row <= spec.rows; row++) {
+        let seq = 1;
+        while (seq <= spec.cols) {
+          if (rnd() > spec.fill) {
+            seq++;
+            continue;
           }
-          rack.servers.push(server);
-          unit += h;
+          // ~10% of racks span 2–5 cells of the row.
+          const span = rnd() < 0.1 ? Math.min(2 + Math.floor(rnd() * 4), spec.cols - seq + 1) : 1;
+          const cells = Array.from({ length: span }, (_, k) => `${level}${zone}${pad(row, 2)}${pad(seq + k, 2)}`);
+          seq += span;
+          rackSeq++;
+          const base = { build_name: spec.name, floorspace_name: cells.join(','), rack_name: `RI${spec.rack}${pad(rackSeq, 6)}` };
+          if (rnd() < 0.05) {
+            out.push({ ...base, company: '', device_position: '', device_name: '' }); // empty rack
+            continue;
+          }
+          const company = pick(COMPANIES);
+          const target = Math.min(42, Math.round(42 * (0.12 + 0.88 * Math.pow(rnd(), 4))));
+          const sharing = rnd() < 0.15; // racks with boundary-shared U pairs
+          let next = 1; // first free U
+          let prev = null;
+          while (true) {
+            const r = rnd();
+            const h = r < 0.5 ? 1 : r < 0.8 ? 2 : r < 0.93 ? 3 : 4;
+            // Boundary share: both devices ≥ 2U, the new one starts on the previous one's last U.
+            const share = sharing && prev && prev.h >= 2 && h >= 2 && rnd() < 0.5;
+            const s = share ? prev.e : next;
+            const e = s + h - 1;
+            if (e > 42 || s > target) break;
+            devSeq++;
+            out.push({
+              ...base,
+              company: rnd() < 0.8 ? company : pick(COMPANIES),
+              device_position: `${h}U (${s}-${e})`,
+              device_name: `${pick(PREFIXES)}-${spec.code}-${pad(devSeq, 5)}`,
+            });
+            prev = { s, e, h };
+            next = e + 1;
+          }
         }
       }
-    }
-    floors.push({ id, level, rows, cols, racks });
+  return out;
+}
+
+/** @param {number} seed @returns {object[]} records */
+export function generate(seed = 20261120) {
+  return DCS.flatMap((spec, i) => generateDc(spec, mulberry32(seed + i * 7919)));
+}
+
+export function summarize(records) {
+  const per = new Map();
+  for (const r of records) {
+    const d = per.get(r.build_name) || per.set(r.build_name, { racks: new Set(), devices: 0, spans: 0 }).get(r.build_name);
+    if (!d.racks.has(r.rack_name) && r.floorspace_name.includes(',')) d.spans++;
+    d.racks.add(r.rack_name);
+    if (r.device_position) d.devices++;
   }
-  return { id: spec.id, name: spec.name, floors };
-}
-
-/** @param {number} seed */
-export function generate(seed = 20261116) {
-  return { version: 2, datacenters: DCS.map((spec, i) => generateDc(spec, mulberry32(seed + i * 7919))) };
-}
-
-export function summarize(data) {
-  const per = data.datacenters.map((dc) => {
-    let racks = 0, servers = 0, noH = 0;
-    for (const f of dc.floors) for (const r of f.racks) {
-      racks++;
-      for (const s of r.servers) { servers++; if (s.height_u === undefined) noH++; }
-    }
-    return { id: dc.id, floors: dc.floors.length, racks, servers, noH };
-  });
-  const servers = per.reduce((a, d) => a + d.servers, 0);
-  const noH = per.reduce((a, d) => a + d.noH, 0);
-  return { per, racks: per.reduce((a, d) => a + d.racks, 0), servers, pctNoHeight: +(100 * noH / servers).toFixed(2) };
+  return [...per].map(([name, d]) => ({ name, racks: d.racks.size, devices: d.devices, multiCellRacks: d.spans }));
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const out = resolve(here, '../public/data/datacenter.json');
-  const data = generate();
+  const records = generate();
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, JSON.stringify(data));
-  const s = summarize(data);
-  for (const d of s.per) console.log(`${d.id}: floors=${d.floors} racks=${d.racks} servers=${d.servers}`);
-  console.log(`total racks=${s.racks} servers=${s.servers} missing_height_u=${s.pctNoHeight}% -> ${out}`);
+  writeFileSync(out, JSON.stringify(records));
+  for (const d of summarize(records)) console.log(`${d.name}: racks=${d.racks} devices=${d.devices} multi-cell=${d.multiCellRacks}`);
+  console.log(`records=${records.length} -> ${out}`);
 }

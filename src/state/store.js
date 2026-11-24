@@ -12,7 +12,6 @@ export function createStore({ data, location, history }) {
 
   /** dcId -> {dc, floors, racks, servers}; floor/rack/server ids are unique within a DC only. */
   let dcs = new Map();
-  let firstDc = null;
   /** Bumped by setData; the scene/UI compare it to know their cached build is stale. */
   let revision = 0;
   function index(d) {
@@ -30,11 +29,11 @@ export function createStore({ data, location, history }) {
       }
       dcs.set(dc.id, { dc, floors, racks, servers });
     }
-    firstDc = d.datacenters[0].id;
     data = d;
   }
   index(data);
-  const scope = (dcId) => dcs.get(dcId ?? state.dc ?? firstDc) || null;
+  /** The DC a lookup refers to; null on the map (no DC selected) — there is no implicit first DC. */
+  const scope = (dcId) => dcs.get(dcId ?? state.dc) || null;
 
   const getDc = (id = state.dc) => dcs.get(id)?.dc || null;
   const getFloor = (id, dcId) => scope(dcId)?.floors.get(id) || null;
@@ -44,14 +43,16 @@ export function createStore({ data, location, history }) {
   const norm = (p) => ({ dc: p?.dc ?? null, floor: p?.floor ?? null, rack: p?.rack ?? null, server: p?.server ?? null });
   const same = (a, b) => a.dc === b.dc && a.floor === b.floor && a.rack === b.rack && a.server === b.server;
 
+  const MAP = { dc: null, floor: null, rack: null, server: null };
+
   /**
-   * Nearest valid ancestor inside the target DC. No `dc` → first DC (legacy hashes keep their floor/rack/server);
-   * an unknown `dc` → first DC's overview (its children belonged to that other DC).
+   * Nearest valid ancestor inside the target DC. No `dc` or an unknown `dc` → the map (legacy hashes
+   * such as `#floor=2F` without a DC have no DC to belong to).
    */
   function resolve(partial) {
     const p = norm(partial);
-    if (p.dc != null && !dcs.has(p.dc)) return { dc: firstDc, floor: null, rack: null, server: null };
-    const dc = p.dc ?? firstDc;
+    if (p.dc == null || !dcs.has(p.dc)) return { ...MAP };
+    const dc = p.dc;
     const { floors, racks, servers } = dcs.get(dc);
     const s = p.server != null ? servers.get(p.server) : null;
     if (s) return { dc, floor: s.floor.id, rack: s.rack.id, server: s.server.id };
@@ -61,19 +62,25 @@ export function createStore({ data, location, history }) {
     return { dc, floor: null, rack: null, server: null };
   }
 
-  const modeOf = (s) => (s.server ? 'server' : s.rack ? 'rack' : s.floor ? 'floor' : 'overview');
+  const modeOf = (s) => (s.dc == null ? 'map' : s.server ? 'server' : s.rack ? 'rack' : s.floor ? 'floor' : 'overview');
   const mode = () => modeOf(state);
 
-  /** Writes location.hash only; never mutates state. `next.dc` defaults to the current DC. */
+  /** Writes location.hash only; never mutates state. `next.dc` defaults to the current DC; `{dc: null}` = the map. */
   function navigate(next) {
-    location.hash = serialize(resolve({ ...next, dc: next?.dc ?? state.dc ?? firstDc }));
+    const dc = next && 'dc' in next ? next.dc : state.dc;
+    location.hash = serialize(resolve({ ...next, dc }));
   }
 
-  /** The only state mutator. */
-  function apply(parsed) {
+  /** False until the first apply: that one always notifies, even when it resolves to the initial map state. */
+  let applied = false;
+
+  /** The only state mutator. `parsed` is a parsed hash; '' / `#map` / anything without a known dc → the map. */
+  function apply(parsed, hashString) {
     const resolved = resolve(parsed);
-    if (!same(resolved, norm(parsed))) history.replaceState(null, '', serialize(resolved));
-    if (same(resolved, state)) return;
+    const canonical = serialize(resolved);
+    if (hashString !== undefined ? hashString !== canonical : !same(resolved, norm(parsed))) history.replaceState(null, '', canonical);
+    if (applied && same(resolved, state)) return;
+    applied = true;
     const prev = state;
     state = resolved;
     for (const fn of [...subs]) fn(prev, state);
@@ -81,7 +88,7 @@ export function createStore({ data, location, history }) {
 
   /**
    * Replaces the dataset (upload, edit, reset). The current state is re-resolved against the new data
-   * (a deleted server falls back to its rack, …), or reset to the first DC's overview with `reset`.
+   * (a deleted server falls back to its rack, a deleted DC to the map, …), or reset to the map with `reset`.
    * Subscribers are always notified, even when the state is unchanged, because the data behind it changed.
    */
   function setData(next, { reset = false } = {}) {
@@ -100,6 +107,7 @@ export function createStore({ data, location, history }) {
   }
 
   const selectDc = (dcId) => navigate({ dc: dcId });
+  const showMap = () => navigate({ dc: null });
   const enterFloor = (floorId) => navigate({ floor: floorId });
   const openRack = (rackId) => navigate({ rack: rackId });
   const selectServer = (serverId) => navigate({ server: serverId });
@@ -107,12 +115,14 @@ export function createStore({ data, location, history }) {
   function up() {
     if (state.server) navigate({ floor: state.floor, rack: state.rack });
     else if (state.rack) navigate({ floor: state.floor });
-    else if (state.floor) navigate({});
+    else if (state.floor) navigate({ dc: state.dc });
+    else if (state.dc != null) showMap();
   }
 
-  /** @param {'root'|'floor'|'rack'|'server'} level root = the current DC's overview */
+  /** @param {'root'|'dc'|'floor'|'rack'|'server'} level root = the map, dc = the current DC's overview */
   function goLevel(level) {
-    if (level === 'root') navigate({});
+    if (level === 'root') showMap();
+    else if (level === 'dc') navigate({ dc: state.dc });
     else if (level === 'floor') navigate({ floor: state.floor });
     else if (level === 'rack') navigate({ floor: state.floor, rack: state.rack });
     else if (level === 'server') navigate({ ...state });
@@ -140,6 +150,7 @@ export function createStore({ data, location, history }) {
     navigate,
     apply,
     selectDc,
+    showMap,
     enterFloor,
     openRack,
     selectServer,
@@ -154,7 +165,7 @@ export function createStore({ data, location, history }) {
 
 /** Installs the hashchange listener and does the initial apply. */
 export function bindHash(store, win) {
-  const handler = () => store.apply(parse(win.location.hash));
+  const handler = () => store.apply(parse(win.location.hash), win.location.hash);
   win.addEventListener('hashchange', handler);
   handler();
   return () => win.removeEventListener?.('hashchange', handler);

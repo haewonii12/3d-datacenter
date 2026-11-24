@@ -8,7 +8,8 @@ import { renderError } from './ui/error.js';
 import { renderWarnings } from './ui/warnings.js';
 import { createFloorSummary } from './ui/floorSummary.js';
 import { createBreadcrumb } from './ui/breadcrumb.js';
-import { createDcSelect } from './ui/dcSelect.js';
+import { createMapView } from './ui/mapView.js';
+import { getTheme, themeRevision, onThemeChange, applyDocumentTheme, createThemeToggle } from './ui/theme.js';
 import { createDataMenu } from './ui/dataMenu.js';
 import { createEditor } from './ui/editor.js';
 import { createSetup } from './scene/setup.js';
@@ -47,11 +48,12 @@ function install(data) {
     onTick: setup.onTick,
     detail,
     getDc: (id) => store.getDc(id),
-    getRevision: () => store.revision,
+    getRevision: () => `${store.revision}:${themeRevision()}`,
+    setShadows: (on) => setup.setShadows(on),
   });
 
   const panel = $('#panel');
-  const dcSelect = createDcSelect($('#dc-select'), store);
+  const mapView = createMapView($('#map-view'), store);
   const summary = createFloorSummary($('#floor-summary'), store);
   const breadcrumb = createBreadcrumb($('#breadcrumb'), store);
   const tooltip = createTooltip($('#tooltip'), store);
@@ -67,9 +69,14 @@ function install(data) {
     editor.render(state);
     panel.hidden = [...panel.children].every((c) => c.hidden);
   };
-  store.subscribe((prev, next) => view.applyView(prev, next));
+  store.subscribe((prev, next) => {
+    // Map screen: the 3D viewport is hidden and not drawn; the scene stays built for a quick return.
+    if (next.dc == null) setup.pause();
+    else setup.resume();
+    view.applyView(prev, next);
+  });
   store.subscribe((_, next) => {
-    dcSelect.render(next);
+    mapView.render(next);
     summary.render(next);
     breadcrumb.render(next);
     renderPanels(next);
@@ -89,7 +96,26 @@ function install(data) {
   if (debugEnabled()) {
     const dom = setup.renderer.domElement;
     const api = installDebug({ store, view, floors, racks, detail, picking, camera: setup.camera, controls: setup.controls, dom, renderer: setup.renderer });
-    api.extend({ revision: () => store.revision, data: () => toPlain(store.data) });
+    api.extend({
+      revision: () => store.revision,
+      data: () => toPlain(store.data),
+      isSettled: () => (store.state.dc == null ? mapView.isSettled() : view.isSettled()),
+      theme: () => getTheme().name,
+      shadows: () => setup.shadows,
+      paused: () => setup.paused,
+      background: () => (setup.scene.background?.isTexture ? 'texture' : setup.scene.background ? 'color' : null),
+      fog: () => Boolean(setup.scene.fog),
+      wallCount: (floorId) => {
+        let n = 0;
+        floors.get(floorId)?.zones.traverse((o) => o.userData.kind === 'wall' && n++);
+        return n;
+      },
+      zoneIds: (floorId) => (floors.get(floorId)?.floor.zones ?? []).map((z) => z.id),
+      bandCount: (floorId) => racks.byFloor.get(floorId)?.band?.count ?? 0,
+      panelCount: (floorId) => racks.byFloor.get(floorId)?.slots ?? 0,
+      violationRackIds: () => racks.violationIds(),
+      rackFootprint: (id) => racks.footprint(id),
+    });
   }
 
   // ESC = up one level, except while typing (search clears/blurs itself; editor controls keep focus).
@@ -99,10 +125,18 @@ function install(data) {
     if (active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA' || active?.closest?.('#editor')) return;
     store.up();
   });
-  // The first apply (prev state has dc=null) builds the DC and places everything without animation.
+  onThemeChange(() => {
+    setup.applyTheme();
+    // Rebuild the DC's scene in the new colours (the revision includes the theme); camera stays put.
+    if (store.state.dc != null) view.applyView(store.state, store.state);
+  });
+  // The first apply builds the map (or the hash's DC) without animation.
   bindHash(store, window);
   return { store, editor, renderPanels };
 }
+
+applyDocumentTheme();
+createThemeToggle($('#theme-toggle'));
 
 const menu = createDataMenu($('#topbar'), {
   onFile: (file) => uploadFile(file),
@@ -130,7 +164,8 @@ function accept(result, { reset = false, title } = {}) {
     return false;
   }
   $('#error').hidden = true;
-  renderWarnings({ badge: $('#warnings'), list: $('#warnings-list'), info: $('#info') }, result.warnings, result.info);
+  const onPick = (t) => ui?.store.navigate({ dc: t.dc, rack: t.rack ?? null, server: t.server ?? null, floor: null });
+  renderWarnings({ badge: $('#warnings'), list: $('#warnings-list'), info: $('#info'), onPick }, result.warnings, result.info);
   if (!ui) ui = install(result.data);
   else ui.store.setData(result.data, { reset });
   menu.setEnabled(true);

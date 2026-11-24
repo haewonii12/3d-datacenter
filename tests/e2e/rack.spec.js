@@ -1,14 +1,14 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { boot, settled, dc } from './helpers.js';
-import { normalize } from '../../src/data/schema.js';
+import { boot, settled, dc, loadSample, FIRST_DC, trackErrors } from './helpers.js';
 import { usedU, occupancy, colorFor } from '../../src/domain/occupancy.js';
-import { RACK, gridToWorld, floorY, unitToY, frontNormal, rackLabel } from '../../src/domain/layout.js';
+import { RACK, floorY, unitToY, frontNormal, rackLabel, rackCellsLabel, rackFootprint } from '../../src/domain/layout.js';
 
-const file = JSON.parse(readFileSync(new URL('../../public/data/datacenter.json', import.meta.url), 'utf8'));
 // These specs exercise the first DC (the default view); multi-DC behaviour lives in datacenter.spec.js.
-const raw = file.datacenters[0];
-const data = normalize(file).datacenters[0];
+const data = loadSample().datacenters.find((d) => d.id === FIRST_DC);
+const state0 = { dc: FIRST_DC, floor: null, rack: null, server: null };
+/** `#dc=<first DC>&…` for the given view parts. */
+const hashOf = (o = {}) =>
+  `#dc=${encodeURIComponent(FIRST_DC)}${Object.entries(o).map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join('')}`;
 // Floors bottom-to-top by level (same order the scene stacks them).
 const floorIndex = new Map(
   data.floors
@@ -22,12 +22,11 @@ const byId = new Map(allRacks.map((e) => [e.rack.id, e]));
 /** Expected world center of a rack, from data + layout constants (independent of the scene). */
 function center(rackId) {
   const { rack, floor } = byId.get(rackId);
-  const { x, z } = gridToWorld(floor, rack.row, rack.col);
-  return { x, y: floorY(floorIndex.get(floor.id)) + RACK.h / 2, z };
+  const { cx, cz } = rackFootprint(floor, rack);
+  return { x: cx, y: floorY(floorIndex.get(floor.id)) + RACK.h / 2, z: cz };
 }
 const bottomY = (rackId) => center(rackId).y - RACK.h / 2;
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-
 
 /** Well-filled racks near the middle columns of a floor with the requested row parity, best first. */
 function rackCandidates(floorId, parity) {
@@ -62,7 +61,7 @@ async function hoverRack(page, rackId) {
   await page.mouse.move(pos.x, pos.y);
   const { rack, floor } = byId.get(rackId);
   await expect(page.locator('#tooltip')).toBeVisible();
-  await expect(page.locator('#tooltip')).toContainText(`${rackLabel(rack)} · ${floor.id}`);
+  await expect(page.locator('#tooltip')).toContainText(`${rackLabel(rack)} · ${rackCellsLabel(rack)} · `);
   return pos;
 }
 
@@ -94,20 +93,20 @@ test.describe('rack mode', () => {
     await page.mouse.click(pos.x, pos.y);
     await expect.poll(() => dc(page, () => window.__dc.mode())).toBe('rack');
     await settled(page);
-    expect(await dc(page, () => window.__dc.state())).toEqual({ dc: 'seoul-1', floor: top, rack: rack.id, server: null });
+    expect(await dc(page, () => window.__dc.state())).toEqual({ ...state0, floor: top, rack: rack.id });
     expect(await dc(page, () => window.__dc.selectedRackId())).toBe(rack.id);
     await expect(page.locator('#tooltip')).toBeHidden();
   });
 
   for (const parity of [1, 0]) {
     test(`AC8/AC9/AC7: click ${parity ? 'odd' : 'even'}-row rack in floor mode → smooth camera, framed, servers placed`, async ({ page }) => {
-      await boot(page, '#floor=2F');
+      await boot(page, hashOf({ floor: '2F' }));
       const rack = await unoccluded(page, rackCandidates('2F', parity));
       // AC7 tooltip: label + percent
       const pos = await hoverRack(page, rack.id);
       const pct = `${Math.round((usedU(rack) / rack.total_u) * 100)}%`;
       await expect(page.locator('#tooltip')).toHaveText(
-        `${rackLabel(rack)} · 2F · ${usedU(rack)}/${rack.total_u}U (${pct})`,
+        `${rackLabel(rack)} · ${rackCellsLabel(rack)} · ${usedU(rack)}/${rack.total_u}U (${pct})`,
       );
 
       const start = await dc(page, () => window.__dc.camera());
@@ -119,7 +118,7 @@ test.describe('rack mode', () => {
       expect(dist(mid.position, start.position)).toBeGreaterThan(0.01);
       expect(dist(mid.position, end.position)).toBeGreaterThan(0.01);
 
-      expect(await dc(page, () => window.__dc.state())).toEqual({ dc: 'seoul-1', floor: '2F', rack: rack.id, server: null });
+      expect(await dc(page, () => window.__dc.state())).toEqual({ ...state0, floor: '2F', rack: rack.id });
       const c = center(rack.id);
       const n = frontNormal(rack.row);
       expect(dist(end.target, c)).toBeLessThan(0.01);
@@ -141,25 +140,22 @@ test.describe('rack mode', () => {
       expect(await dc(page, () => window.__dc.visibleRackIds())).not.toContain(rack.id);
       expect(await dc(page, () => window.__dc.floorOpacity('2F'))).toBeCloseTo(0.15, 5);
 
-      // AC7 (rack mode): hovering a server shows hostname · U-range
+      // AC7 (rack mode): hovering a server shows device_name · company · U-range
       const s = rack.servers.find((x) => x.height_u >= 2) ?? rack.servers[0];
       const sp = await dc(page, (id) => window.__dc.serverScreenPos(id), s.id);
       expect(await dc(page, (p) => window.__dc.pickAt(p.x, p.y), sp)).toEqual({ kind: 'server', id: s.id });
       await page.mouse.move(sp.x, sp.y);
       await expect(page.locator('#tooltip')).toBeVisible();
-      await expect(page.locator('#tooltip')).toContainText(s.hostname);
+      await expect(page.locator('#tooltip')).toHaveText(`${s.device_name} · ${s.company} · U${s.unit}${s.height_u >= 2 ? `–${s.unit + s.height_u - 1}` : ''}`);
     });
   }
 
-  test('AC10/AC3: elevation rows U42→U1, empty rows, height_u-less server spans 1 row, click selects', async ({ page }) => {
-    // Raw JSON: a server with no height_u.
-    let target = null;
-    for (const f of raw.floors)
-      for (const r of f.racks)
-        for (const s of r.servers || []) if (!target && s.height_u == null) target = { rackId: r.id, serverId: s.id };
-    expect(target).toBeTruthy();
-    const rack = byId.get(target.rackId).rack;
-    await boot(page, `#rack=${encodeURIComponent(rack.id)}`);
+  test('AC10/AC3: elevation rows U42→U1, empty rows, 1U device spans 1 row, multi-U spans its rows, click selects', async ({ page }) => {
+    // A rack holding both a 1U device and a taller one.
+    const rack = allRacks.map((e) => e.rack).find((r) => r.servers.some((s) => s.height_u === 1) && r.servers.some((s) => s.height_u >= 2));
+    expect(rack).toBeTruthy();
+    const target = { rackId: rack.id, serverId: rack.servers.find((s) => s.height_u === 1).id };
+    await boot(page, hashOf({ rack: rack.id }));
     const panel = page.locator('#panel');
     await expect(panel).toBeVisible();
     await expect(panel).toContainText(rackLabel(rack));
@@ -180,7 +176,7 @@ test.describe('rack mode', () => {
     const block = panel.locator(`[data-server-id="${target.serverId}"]`);
     await expect(block).toBeVisible();
     const server = rack.servers.find((s) => s.id === target.serverId);
-    await expect(block).toContainText(server.hostname);
+    await expect(block).toContainText(server.device_name);
     const bb = await block.boundingBox();
     const rowBox = await panel.locator(`[data-u="${server.unit}"]`).boundingBox();
     expect(bb.height).toBeLessThanOrEqual(rowBox.height + 0.5);
@@ -199,7 +195,7 @@ test.describe('rack mode', () => {
 
     await block.click();
     await expect.poll(() => dc(page, () => window.__dc.state())).toEqual({
-      dc: 'seoul-1',
+      ...state0,
       floor: byId.get(rack.id).floor.id,
       rack: rack.id,
       server: target.serverId,
@@ -210,7 +206,7 @@ test.describe('rack mode', () => {
   test('AC10: empty rack shows 42 .empty rows and no meshes', async ({ page }) => {
     const empty = allRacks.find((e) => e.rack.servers.length === 0);
     expect(empty).toBeTruthy();
-    await boot(page, `#rack=${encodeURIComponent(empty.rack.id)}`);
+    await boot(page, hashOf({ rack: empty.rack.id }));
     await expect(page.locator('#panel [data-u]')).toHaveCount(42);
     await expect(page.locator('#panel [data-u].empty')).toHaveCount(42);
     await expect(page.locator('#panel [data-server-id]')).toHaveCount(0);
@@ -221,7 +217,7 @@ test.describe('rack mode', () => {
   // behind) are zero-scaled and unpickable in rack mode, so AC21 now switches to a same-row neighbour.
   test('AC21: click a faded same-row neighbour → switches rack, rebuilds meshes, restores old instance', async ({ page }) => {
     const rack = pickRack('2F', 1);
-    await boot(page, '#floor=2F');
+    await boot(page, hashOf({ floor: '2F' }));
     await dc(page, (id) => window.__dc.navigate({ rack: id }), rack.id);
     await expect.poll(() => dc(page, () => window.__dc.selectedRackId())).toBe(rack.id);
     await settled(page);
@@ -270,7 +266,7 @@ test.describe('rack mode', () => {
     const used = (u) => rack.servers.some((s) => u >= s.unit && u < s.unit + s.height_u);
     const freeUnits = Array.from({ length: 42 }, (_, i) => i + 1).filter((u) => !used(u));
     expect(freeUnits.length).toBeGreaterThan(0);
-    await boot(page, `#rack=${encodeURIComponent(rack.id)}`);
+    await boot(page, hashOf({ rack: rack.id }));
     const before = await dc(page, () => window.__dc.state());
 
     // Culled set = racks of the floor with (center − selected)·n > RACK.d/2, computed from data.
@@ -336,7 +332,7 @@ test.describe('rack mode', () => {
     await page.mouse.click(target.x, target.y);
     await expect.poll(() => dc(page, () => window.__dc.mode())).toBe('floor');
     await settled(page);
-    expect(await dc(page, () => window.__dc.state())).toEqual({ dc: 'seoul-1', floor: before.floor, rack: null, server: null });
+    expect(await dc(page, () => window.__dc.state())).toEqual({ ...state0, floor: before.floor });
     expect(await dc(page, (id) => window.__dc.floorOpacity(id), before.floor)).toBe(1);
   });
 });

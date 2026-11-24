@@ -25,9 +25,15 @@ describe('occupancy', () => {
     expect(occupancy(rack(10, [[1, 5]]))).toBe(0.5);
   });
   it('floorStats avg includes empty racks', () => {
-    const floor = { rows: 2, cols: 3, racks: [rack(10, [[1, 9]]), rack(10, []), rack(10, [[1, 6]])] };
+    const floor = { zones: [{ id: 'A', colOffset: 0, rows: 2, cols: 3 }], racks: [rack(10, [[1, 9]]), rack(10, []), rack(10, [[1, 6]])] };
     const s = floorStats(floor);
     expect(s).toEqual({ racks: 3, slots: 6, usedU: 15, totalU: 30, avg: 0.5, bands: { green: 1, yellow: 1, red: 1 } });
+  });
+  it('usedU: a boundary-shared U counts once; unparsable devices are not mounted', () => {
+    expect(usedU(rack(42, [[29, 3], [31, 2]]))).toBe(4); // U29–32
+    const r = rack(42, [[1, 2]]);
+    r.servers.push({ id: 'bad', invalid: true });
+    expect(usedU(r)).toBe(2);
   });
   it('floorStats with no racks', () => {
     expect(floorStats({ rows: 2, cols: 2, racks: [] }).avg).toBe(0);

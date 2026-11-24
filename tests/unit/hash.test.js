@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest';
-import { parse, serialize } from '../../src/state/hash.js';
+import { parse, serialize, MAP_HASH } from '../../src/state/hash.js';
 
 const nul = { dc: null, floor: null, rack: null, server: null };
 
@@ -8,10 +8,12 @@ it('serialize/parse basic', () => {
   expect(serialize(s)).toBe('#dc=seoul-1&floor=2F&rack=R-2F-03-12&server=srv-0123');
   expect(parse('#dc=seoul-1&floor=2F&rack=R-2F-03-12&server=srv-0123')).toEqual(s);
 });
-it('omits null parts; all-null is empty string', () => {
+it('omits null parts; no dc is the map (#map)', () => {
   expect(serialize({ dc: 'd', floor: '2F', rack: null, server: null })).toBe('#dc=d&floor=2F');
-  expect(serialize({ floor: '2F', rack: null, server: null })).toBe('#floor=2F');
-  expect(serialize(nul)).toBe('');
+  expect(serialize({ floor: '2F', rack: null, server: null })).toBe(MAP_HASH);
+  expect(serialize(nul)).toBe('#map');
+  expect(parse('#map')).toEqual(nul);
+  expect(parse(serialize(nul))).toEqual(nul);
   expect(parse('')).toEqual(nul);
   expect(parse('#')).toEqual(nul);
   expect(parse('#server=x')).toEqual({ ...nul, server: 'x' });

@@ -1,39 +1,32 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import { boot, settled, dc, state, reach } from './helpers.js';
-import { normalize } from '../../src/data/schema.js';
-import { RACK, gridToWorld, frontNormal } from '../../src/domain/layout.js';
+import { boot, settled, dc, state, reach, loadSample, FIRST_DC, trackErrors } from './helpers.js';
+import { RACK, rackFootprint, frontNormal, rackLabel, rackCellsLabel, unitRangeLabel } from '../../src/domain/layout.js';
 
-const file = JSON.parse(readFileSync(new URL('../../public/data/datacenter.json', import.meta.url), 'utf8'));
 // These specs exercise the first DC (the default view); multi-DC behaviour lives in datacenter.spec.js.
-const raw = file.datacenters[0];
-const data = normalize(file).datacenters[0];
-const pad2 = (n) => String(n).padStart(2, '0');
-
-/** Raw (un-normalized) lookups: expectations come from the JSON file itself. */
-const rawServers = new Map();
-for (const floor of raw.floors)
-  for (const rack of floor.racks) for (const server of rack.servers || []) rawServers.set(server.id, { floor, rack, server });
+const data = loadSample().datacenters.find((d) => d.id === FIRST_DC);
 const f2 = data.floors.find((f) => f.id === '2F');
+const hashOf = (o = {}) =>
+  `#dc=${encodeURIComponent(FIRST_DC)}${Object.entries(o).map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join('')}`;
 
-/** `2F-R03-C12-U10` / `…-U10–11`, built from raw fields (height_u missing → 1U). */
-function rawLocation(id) {
-  const { floor, rack, server } = rawServers.get(id);
-  const h = server.height_u ?? 1;
-  const u = h >= 2 ? `U${server.unit}–${server.unit + h - 1}` : `U${server.unit}`;
-  return `${floor.id}-R${pad2(rack.row)}-C${pad2(rack.col)}-${u}`;
-}
+/** deviceId → {floor, rack, server}, from the dataset itself. */
+const lookup = new Map();
+for (const floor of data.floors) for (const rack of floor.racks) for (const server of rack.servers) lookup.set(server.id, { floor, rack, server });
 
-/** Interior, well-filled rack of 2F with the given row parity (its facing row is between camera and rack). */
+/** `2F · 2A0301–02-U10–11`, built from the dataset fields. */
+const location = (id) => {
+  const { floor, rack, server } = lookup.get(id);
+  return `${floor.id} · ${rackCellsLabel(rack)}-${unitRangeLabel(server)}`;
+};
+const rackZ = (rack) => rackFootprint(f2, rack).cz;
+
+/** Interior, well-filled single-cell rack of 2F with the given row parity (its facing row is between camera and rack). */
 function interiorRack(parity, skip = 0) {
   const mid = (f2.cols + 1) / 2;
   return f2.racks
-    .filter((r) => r.row % 2 === parity && r.servers.length >= 6 && r.col > 2 && r.col < f2.cols - 1)
+    .filter((r) => r.row % 2 === parity && r.servers.length >= 6 && r.span === 1 && r.col > 2 && r.col < f2.cols - 1)
     .filter((r) => r.row > 1 && r.row < f2.rows)
     .sort((a, b) => Math.abs(a.col - mid) - Math.abs(b.col - mid) || a.row - b.row)[skip];
 }
-
-
 
 /** Canvas points (not covered by DOM overlays) whose pick satisfies `ok`, scanned on a grid. */
 async function findPoint(page, ok) {
@@ -51,13 +44,17 @@ async function findPoint(page, ok) {
 const isEmpty = (h) => !h || h.kind === 'slab';
 
 async function expectPanel(page, serverId) {
-  const { server } = rawServers.get(serverId);
+  const { server, rack } = lookup.get(serverId);
   const d = page.locator('#server-detail');
   await expect(d).toBeVisible();
-  await expect(d.locator('[data-k=hostname]')).toHaveText(server.hostname);
-  await expect(d.locator('[data-k=ip]')).toHaveText(server.ip);
-  await expect(d.locator('[data-k=location]')).toHaveText(rawLocation(serverId));
-  await expect(d.locator('[data-k=height]')).toHaveText(`${server.height_u ?? 1}U`);
+  await expect(d.locator('[data-k=device_name]')).toHaveText(server.device_name);
+  await expect(d.locator('[data-k=company]')).toHaveText(server.company);
+  await expect(d.locator('[data-k=build_name]')).toHaveText(data.name);
+  await expect(d.locator('[data-k=rack_name]')).toHaveText(rack.name);
+  await expect(d.locator('[data-k=floorspace_name]')).toHaveText(rack.floorspaces.join(','));
+  await expect(d.locator('[data-k=device_position]')).toHaveText(server.device_position);
+  await expect(d.locator('[data-k=location]')).toHaveText(location(serverId));
+  await expect(d.locator('[data-k=violations]')).toHaveCount(0);
   // Both the elevation and the details are in view (details below the compacted elevation).
   await expect(page.locator('#elevation')).toBeVisible();
   await expect(page.locator(`#elevation [data-server-id="${serverId}"]`)).toHaveClass(/selected/);
@@ -90,15 +87,15 @@ test.describe('server selection & navigation', () => {
 
   test('AC12/AC14: 3D click on a server of an interior rack → panel, slide-out; switching reverts; ESC clears', async ({ page }) => {
     const rack = interiorRack(1);
-    await boot(page, `#rack=${encodeURIComponent(rack.id)}`);
+    await boot(page, hashOf({ rack: rack.id }));
     // The facing row (between camera and rack) is culled, so it no longer occludes the servers.
     const n = frontNormal(rack.row);
-    const sel = gridToWorld(f2, rack.row, rack.col);
-    const facing = f2.racks.filter((r) => (gridToWorld(f2, r.row, r.col).z - sel.z) * n.z > RACK.d / 2);
+    const sel = { z: rackZ(rack) };
+    const facing = f2.racks.filter((r) => (rackZ(r) - sel.z) * n.z > RACK.d / 2);
     expect(facing.length).toBeGreaterThan(0);
     expect((await dc(page, () => window.__dc.culledRackIds())).sort()).toEqual(facing.map((r) => r.id).sort());
 
-    const [a, b] = [...rack.servers].sort((x, y) => y.height_u - x.height_u);
+    const [a, b] = [...rack.servers].sort((x, y) => y.height_u - x.height_u || x.unit - y.unit);
     const sp = await dc(page, (id) => window.__dc.serverScreenPos(id), a.id);
     expect(await dc(page, (p) => window.__dc.pickAt(p.x, p.y), sp)).toEqual({ kind: 'server', id: a.id });
     const cam = await dc(page, () => window.__dc.camera());
@@ -106,7 +103,7 @@ test.describe('server selection & navigation', () => {
     await reach(page, { floor: '2F', rack: rack.id, server: a.id });
     await expectPanel(page, a.id);
     await expectSlid(page, a.id);
-    await expect(page.locator('#breadcrumb')).toHaveText(`${data.name}>2F>R${pad2(rack.row)}-C${pad2(rack.col)}>${a.hostname}`);
+    await expect(page.locator('#breadcrumb')).toHaveText(`지도>${data.name}>2F>${rackLabel(rack)}>${a.device_name}`);
     await expect(page.locator('#breadcrumb [data-level=server]')).toHaveClass(/current/);
 
     // Another server of the same rack: previous reverts, camera stays at the rack preset.
@@ -134,8 +131,8 @@ test.describe('server selection & navigation', () => {
 
   test('AC12: elevation block click → server panel', async ({ page }) => {
     const rack = interiorRack(0);
-    const s = rack.servers.find((x) => rawServers.get(x.id).server.height_u == null) ?? rack.servers[0];
-    await boot(page, `#rack=${encodeURIComponent(rack.id)}`);
+    const s = rack.servers.find((x) => x.height_u === 1) ?? rack.servers[0];
+    await boot(page, hashOf({ rack: rack.id }));
     // Right after the hashchange is applied the 200ms slide is running and isSettled() reports it.
     const mid = await page.evaluate(async (id) => {
       const changed = new Promise((r) => window.addEventListener('hashchange', r, { once: true }));
@@ -151,40 +148,16 @@ test.describe('server selection & navigation', () => {
     await expectSlid(page, s.id);
   });
 
-  test('AC13: services listed with name, team and status badge', async ({ page }) => {
-    let target = null;
-    for (const [id, { server }] of rawServers) {
-      const st = (server.services || []).map((v) => v.status);
-      if (!target && st.includes('warn') && st.includes('down')) target = id;
-    }
-    expect(target).toBeTruthy();
-    await boot(page, `#server=${encodeURIComponent(target)}`);
-    const services = rawServers.get(target).server.services;
-    const rows = page.locator('#server-detail .service');
-    await expect(rows).toHaveCount(services.length);
-    const text = { ok: '정상', warn: '경고', down: '중단' };
-    for (let i = 0; i < services.length; i++) {
-      const row = rows.nth(i);
-      await expect(row.locator('[data-k=name]')).toHaveText(services[i].name);
-      await expect(row.locator('[data-k=team]')).toHaveText(services[i].team);
-      const badge = row.locator('.badge');
-      await expect(badge).toHaveClass(new RegExp(`\\bstatus-${services[i].status}\\b`));
-      await expect(badge).toHaveText(text[services[i].status]);
-    }
-    await expect(page.locator('#server-detail .badge.status-warn').first()).toBeVisible();
-    await expect(page.locator('#server-detail .badge.status-down').first()).toBeVisible();
-  });
-
-  test('AC11: ESC chain, ESC in search input ignored, breadcrumb 2F / root', async ({ page }) => {
+  test('AC11: ESC chain (server → rack → floor → overview → map), ESC in search input ignored, breadcrumb crumbs', async ({ page }) => {
     const rack = interiorRack(1);
     const s = rack.servers[0];
-    await boot(page, `#server=${encodeURIComponent(s.id)}`);
+    await boot(page, hashOf({ server: s.id }));
     await reach(page, { floor: '2F', rack: rack.id, server: s.id });
 
     await page.locator('#search').focus();
     await page.keyboard.press('Escape');
     await page.waitForTimeout(200);
-    expect(await state(page)).toEqual({ dc: 'seoul-1', floor: '2F', rack: rack.id, server: s.id });
+    expect(await state(page)).toEqual({ dc: FIRST_DC, floor: '2F', rack: rack.id, server: s.id });
     await page.locator('#search').blur();
 
     await page.keyboard.press('Escape');
@@ -193,22 +166,29 @@ test.describe('server selection & navigation', () => {
     await reach(page, { floor: '2F' });
     await page.keyboard.press('Escape');
     await reach(page, {});
+    // One more ESC at the DC overview goes to the map.
+    await page.keyboard.press('Escape');
+    await reach(page, { dc: null });
+    await expect(page.locator('#map-view')).toBeVisible();
 
-    // Breadcrumb: server → "2F" → floor; then root → overview.
-    await dc(page, (id) => window.__dc.navigate({ server: id }), s.id);
+    // Breadcrumb: server → "2F" → floor; then the DC crumb → overview; then 지도 → map.
+    await dc(page, ({ d, id }) => window.__dc.navigate({ dc: d, server: id }), { d: FIRST_DC, id: s.id });
     await reach(page, { floor: '2F', rack: rack.id, server: s.id });
     await page.locator('#breadcrumb [data-level=floor]').click();
     await reach(page, { floor: '2F' });
     await expect(page.locator('#breadcrumb [data-level=floor]')).toHaveClass(/current/);
-    await page.locator('#breadcrumb [data-level=root]').click();
+    await page.locator('#breadcrumb [data-level=dc]').click();
     await reach(page, {});
+    await expect(page.locator('#breadcrumb [data-level]')).toHaveCount(2);
+    await page.locator('#breadcrumb [data-level=root]').click();
+    await reach(page, { dc: null });
     await expect(page.locator('#breadcrumb [data-level]')).toHaveCount(1);
   });
 
   test('AC11: empty-space click server → rack → floor → overview; server click switches; drag keeps state', async ({ page }) => {
     const rack = interiorRack(1);
     const [a, b] = rack.servers;
-    await boot(page, `#server=${encodeURIComponent(a.id)}`);
+    await boot(page, hashOf({ server: a.id }));
     await reach(page, { floor: '2F', rack: rack.id, server: a.id });
 
     // 2-pass in server mode: a click on another server selects it.
@@ -225,7 +205,7 @@ test.describe('server selection & navigation', () => {
     await page.mouse.move(e0.x + 50, e0.y, { steps: 10 });
     await page.mouse.up();
     await page.waitForTimeout(200);
-    expect(await state(page)).toEqual({ dc: 'seoul-1', floor: '2F', rack: rack.id, server: b.id });
+    expect(await state(page)).toEqual({ dc: FIRST_DC, floor: '2F', rack: rack.id, server: b.id });
 
     const e1 = await findPoint(page, isEmpty);
     await page.mouse.click(e1.x, e1.y);
@@ -247,7 +227,7 @@ test.describe('server selection & navigation', () => {
 
   test('AC21 tail / AC4: rack → ESC → floor opacity 1; breadcrumb "2F" from rack hides other floors', async ({ page }) => {
     const rack = interiorRack(0);
-    await boot(page, `#rack=${encodeURIComponent(rack.id)}`);
+    await boot(page, hashOf({ rack: rack.id }));
     await page.keyboard.press('Escape');
     await reach(page, { floor: '2F' });
     expect(await dc(page, () => window.__dc.floorOpacity('2F'))).toBe(1);
@@ -282,7 +262,7 @@ test.describe('server selection & navigation', () => {
     await page.reload();
     await expect(page.locator('#app')).toHaveAttribute('data-ready', 'ok');
     await settled(page);
-    expect(await state(page)).toEqual({ dc: 'seoul-1', floor: '2F', rack: rack.id, server: s.id });
+    expect(await state(page)).toEqual({ dc: FIRST_DC, floor: '2F', rack: rack.id, server: s.id });
     await expectPanel(page, s.id);
     await expectSlid(page, s.id);
 
@@ -292,10 +272,10 @@ test.describe('server selection & navigation', () => {
     await page.goBack();
     await reach(page, { floor: '2F' });
 
-    await page.goto('/?debug=1#floor=2F&rack=NOPE');
+    await page.goto(`/?debug=1${hashOf({ floor: '2F', rack: 'NOPE' })}`);
     await expect(page.locator('#app')).toHaveAttribute('data-ready', 'ok');
     await settled(page);
-    expect(await state(page)).toEqual({ dc: 'seoul-1', floor: '2F', rack: null, server: null });
-    expect(await page.evaluate(() => location.hash)).toBe('#dc=seoul-1&floor=2F');
+    expect(await state(page)).toEqual({ dc: FIRST_DC, floor: '2F', rack: null, server: null });
+    expect(await page.evaluate(() => location.hash)).toBe(hashOf({ floor: '2F' }));
   });
 });

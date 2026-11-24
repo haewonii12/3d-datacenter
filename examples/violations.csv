@@ -1,0 +1,15 @@
+﻿build_name,floorspace_name,company,rack_name,device_position,device_name
+가산IDC,1A0101,해원회사,RV-SAME,1U (29-29),same-a
+가산IDC,1A0101,해원회사,RV-SAME,1U (29-29),same-b
+가산IDC,1A0102,해원회사,RV-CONTAIN,3U (29-31),contain-outer
+가산IDC,1A0102,해원회사,RV-CONTAIN,1U (31-31),contain-inner
+가산IDC,1A0103,해원회사,RV-OVERLAP,3U (10-12),overlap-a
+가산IDC,1A0103,해원회사,RV-OVERLAP,3U (11-13),overlap-b
+가산IDC,1A0103,해원회사,RV-OVERLAP,3U (29-31),boundary-ok-a
+가산IDC,1A0103,해원회사,RV-OVERLAP,2U (31-32),boundary-ok-b
+가산IDC,"1A0201,1A0202",한빛솔루션,RV-CELL-A,2U (1-2),cell-a
+가산IDC,1A0202,한빛솔루션,RV-CELL-B,2U (1-2),cell-b
+가산IDC,"1A0301,1A0303",누리텍,RV-GAP,1U (1-1),noncontiguous
+가산IDC,1A0104,누리텍,RV-BADPOS,2U (5-7),bad-height
+가산IDC,1A0104,누리텍,RV-BADPOS,abc,bad-format
+의왕IDC,3A0401,해원회사,RI20261120,1U (39-39),uiwang-001

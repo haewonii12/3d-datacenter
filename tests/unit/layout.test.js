@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest';
-import { gridToWorld, worldToGrid, floorY, unitToY, frontNormal, rackLabel, locationLabel, unitRangeLabel, UNIT_H, FLOOR_SPACING, COL_PITCH, ROW_PITCH, SLAB_PAD, RACK, floorFootprint, stackExtent } from '../../src/domain/layout.js';
+import { gridToWorld, worldToGrid, floorY, unitToY, frontNormal, rackLabel, locationLabel, unitRangeLabel, rackFootprint, rackWidth, mountY, floorspaceAt, zoneRect, rackCellsLabel, UNIT_H, FLOOR_SPACING, COL_PITCH, ROW_PITCH, SLAB_PAD, RACK, floorFootprint, stackExtent } from '../../src/domain/layout.js';
 import { overviewPreset, floorPreset } from '../../src/domain/camera.js';
 
 it('gridToWorld centers grid at origin', () => {
@@ -27,13 +27,53 @@ it('frontNormal by row parity', () => {
   expect(frontNormal(3).z).toBe(1);
 });
 it('labels', () => {
-  const rack = { row: 3, col: 12 };
-  expect(rackLabel(rack)).toBe('R03-C12');
-  expect(rackLabel({ row: 11, col: 2 })).toBe('R11-C02');
-  expect(locationLabel({ id: '2F' }, rack, { unit: 10, height_u: 1 })).toBe('2F-R03-C12-U10');
-  expect(locationLabel({ id: '2F' }, rack, { unit: 10, height_u: 2 })).toBe('2F-R03-C12-U10–11');
+  const rack = { id: 'RI1', name: 'RI20261120', floorspaces: ['3A0401', '3A0402'] };
+  expect(rackLabel(rack)).toBe('RI20261120');
+  expect(rackLabel({ id: 'RX' })).toBe('RX');
+  expect(rackCellsLabel(rack)).toBe('3A0401–02');
+  expect(locationLabel({ id: '3F' }, rack, { unit: 10, height_u: 1 })).toBe('3A0401–02-U10');
+  expect(locationLabel({ id: '3F' }, rack, { unit: 29, height_u: 3 })).toBe('3A0401–02-U29–31');
   expect(unitRangeLabel({ unit: 5, height_u: 3 })).toBe('U5–7');
   expect(unitRangeLabel({ unit: 5, height_u: 1 })).toBe('U5');
+  expect(unitRangeLabel({ invalid: true, device_position: 'abc' })).toBe('abc');
+});
+
+it('rackFootprint: a span-n rack covers n columns, centered on them', () => {
+  const f = { rows: 3, cols: 5 };
+  const one = rackFootprint(f, { row: 1, col: 2, span: 1 });
+  expect(one.w).toBeCloseTo(RACK.w);
+  expect(one.cx).toBeCloseTo(gridToWorld(f, 1, 2).x);
+  const three = rackFootprint(f, { row: 1, col: 2, span: 3 });
+  expect(three.w).toBeCloseTo(rackWidth(3));
+  expect(three.w).toBeCloseTo(2 * COL_PITCH + RACK.w);
+  expect(three.cx).toBeCloseTo(gridToWorld(f, 1, 3).x); // middle column
+  // left/right edges line up with the outer cells' edges
+  expect(three.cx - three.w / 2).toBeCloseTo(gridToWorld(f, 1, 2).x - RACK.w / 2);
+  expect(three.cx + three.w / 2).toBeCloseTo(gridToWorld(f, 1, 4).x + RACK.w / 2);
+});
+
+it('mountY: boundary-shared U is split at its half; the two boxes touch without overlap', () => {
+  const lower = mountY({ unit: 29, height_u: 3 }, { trimTop: true }); // 3U (29-31)
+  const upper = mountY({ unit: 31, height_u: 2 }, { trimBottom: true }); // 2U (31-32)
+  expect(lower.lo).toBeCloseTo(28 * UNIT_H);
+  expect(lower.hi).toBeCloseTo(30.5 * UNIT_H);
+  expect(upper.lo).toBeCloseTo(30.5 * UNIT_H);
+  expect(upper.hi).toBeCloseTo(32 * UNIT_H);
+  expect(lower.hi).toBeLessThanOrEqual(upper.lo + 1e-12);
+  const plain = mountY({ unit: 10, height_u: 2 });
+  expect(plain.y).toBeCloseTo(unitToY(10, 2));
+  expect(plain.h).toBeCloseTo(2 * UNIT_H);
+});
+
+it('floorspaceAt / zoneRect map grid cells back to codes; zone gaps are null', () => {
+  const f = { level: 3, rows: 2, cols: 7, zones: [{ id: 'A', colOffset: 0, rows: 2, cols: 3 }, { id: 'B', colOffset: 5, rows: 2, cols: 2 }] };
+  const p = gridToWorld(f, 2, 6);
+  expect(floorspaceAt(f, p.x, p.z).code).toBe('3B0201');
+  const gap = gridToWorld(f, 1, 4);
+  expect(floorspaceAt(f, gap.x, gap.z)).toBeNull();
+  const r = zoneRect(f, f.zones[1]);
+  expect(r.x1 - r.x0).toBeCloseTo(2 * COL_PITCH);
+  expect(r.z1 - r.z0).toBeCloseTo(2 * ROW_PITCH);
 });
 
 it('floorFootprint / stackExtent use rows×ROW_PITCH, cols×COL_PITCH and the floor count', () => {

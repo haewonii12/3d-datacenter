@@ -1,3 +1,5 @@
+import { slotCount } from './slots.js';
+
 /** @typedef {{id:string, unit:number, height_u:number}} Server */
 /** @typedef {{id:string, total_u:number, servers:Server[]}} Rack */
 
@@ -11,6 +13,7 @@ export const BAND_COLORS = { green: '#3fb950', yellow: '#d29922', red: '#f85149'
 export function usedU(rack) {
   const seen = new Set();
   for (const s of rack.servers || []) {
+    if (s.invalid) continue; // unparsable position: not mounted
     const lo = Math.max(1, s.unit);
     const hi = Math.min(rack.total_u, s.unit + (s.height_u || 1) - 1);
     for (let u = lo; u <= hi; u++) seen.add(u);
@@ -50,7 +53,7 @@ export function floorStats(floor) {
   }
   return {
     racks: floor.racks.length,
-    slots: floor.rows * floor.cols,
+    slots: slotCount(floor),
     usedU: used,
     totalU: total,
     avg: total === 0 ? 0 : used / total,

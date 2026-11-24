@@ -1,0 +1,10 @@
+{
+  "metric": "ms from page.goto to data-ready=ok + isSettled on the first DC overview (median of 3 loads)",
+  "measuredAt": "2026-11-20",
+  "commit": "57cd944 (before the v2 changes)",
+  "sample": "public/data/datacenter.json v2 sample: 3 DCs, 1574 racks, 10734 servers",
+  "environment": "headless Chromium, --use-angle=swiftshader, 1280x720, vite preview",
+  "runs": [221, 903, 473],
+  "median": 473,
+  "gateFactor": 1.5
+}
